@@ -27,10 +27,16 @@ dao-agent-portal/
 │   └── models.json
 │
 ├── claude/                       # Claude Desktop 配置参考
+│   ├── settings.json.template    # 由 bootstrap 从 .env 编译
+│   ├── settings.local.json       # 权限覆盖
+│   ├── claude_desktop_config.json
+│   ├── statusline-command.sh
+│   └── plugins/                  # 插件市场元数据（备份）
 │
 └── scripts/
     ├── git-hooks/pre-commit      # 密钥泄漏防护
-    └── add-repo-to-config.py     # 安全修改 opencode.json
+    ├── add-repo-to-config.py     # 安全修改 opencode.json
+    └── sync-claude-skills.sh     # 同步 repo skills → ~/.claude/skills
 ```
 
 ## 首次启用
@@ -79,6 +85,23 @@ cp .env.example .env
 rm ~/.config/opencode && cp -a ~/dotfiles-backup/opencode ~/.config/opencode
 rm ~/.claude/skills && cp -a ~/dotfiles-backup/claude-skills ~/.claude/skills
 ```
+
+## 同步 Skills 到 Claude Code
+
+Claude Code 自动从 `~/.claude/skills/` 加载 skill（无需配置项）。将 repo 中的 skill 同步到 Claude 而不破坏现有配置：
+
+```bash
+# 链接 repo 独有的 skill（跳过已存在的，非破坏性）
+./scripts/sync-claude-skills.sh
+
+# 强制覆盖已有 skill
+./scripts/sync-claude-skills.sh --force
+
+# 恢复：仅移除指向 repo 的 symlink
+./scripts/sync-claude-skills.sh restore
+```
+
+脚本尊重已有的 skill——`image-ocr`、`hackernews`、`agent-browser` 等在默认模式下**跳过**，只有传 `--force` 才会覆盖。恢复模式只清除 repo 链接的 symlink，保留原始文件。
 
 ## 密钥保护
 
