@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Pre-commit hook: secret leakage prevention ──
+red="\033[0;31m"
+yellow="\033[0;33m"
+reset="\033[0m"
+
+# SECRET patterns (ERE-compatible, works on macOS grep)
+SECRET_PATTERNS=(
+  'sk-[A-Za-z0-9_-]{20,}'          # OpenAI / Qiniu API keys
+  'ctx7sk-[A-Za-z0-9-]+'           # Context7 API keys
+  'ghp_[A-Za-z0-9_]{36}'           # GitHub PAT (classic)
+  'gho_[A-Za-z0-9_]{36}'           # GitHub OAuth
+  'ghu_[A-Za-z0-9_]{36}'           # GitHub user token
+)
+
+# Files that should NEVER be committed
+FORBIDDEN_FILES=(
+  '.env'
+  'opencode/opencode.json'
+)
+
+violations=0
+
+# Get staged files
+staged=$(git diff --cached --name-only)
+
+# ── Check forbidden files ──
+for file in "${FORBIDDEN_FILES[@]}"; do
+  if echo "$staged" | grep -Fx "$file" >/dev/null 2>&1; then
+    echo -e "${red}❌ FORBIDDEN: '$file' is staged for commit.${reset}"
+    echo "   This file is auto-generated or contains secrets."
+    echo "   Remove it from the staging area:"
+    echo "     git reset HEAD '$file'"
+    violations=$((violations + 1))
+  fi
+done
+
+# ── Check secret patterns in staged file contents ──
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+
+  for pattern in "${SECRET_PATTERNS[@]}"; do
+    matches=$(git show ":${file}" 2>/dev/null | grep -Eno "$pattern" || true)
+    if [ -n "$matches" ]; then
+      echo -e "${red}❌ SECRET DETECTED in '$file':${reset}"
+      echo -e "${yellow}   $matches${reset}"
+      violations=$((violations + 1))
+    fi
+  done
+done <<< "$staged"
+
+if [ "$violations" -gt 0 ]; then
+  echo ""
+  echo -e "${red}╔══════════════════════════════════════════════════╗${reset}"
+  echo -e "${red}║  Commit blocked: $violations secret(s) or forbidden file(s)  ║${reset}"
+  echo -e "${red}║  Fix the issues above and try again.             ║${reset}"
+  echo -e "${red}╚══════════════════════════════════════════════════╝${reset}"
+  exit 1
+fi
+
+exit 0

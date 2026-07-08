@@ -1,0 +1,18 @@
+{
+  "default": "opencode/grok-code",
+  "providers": {
+    "opencode": {
+      "api_key": "your-zen-api-key"
+    },
+    "local": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "ollama"
+    }
+  },
+  "model_preferences": {
+    "analysis": "opencode/grok-code",
+    "coding": "local/deepseek-coder:6.7b",
+    "documentation": "opencode/glm-4.7-free",
+    "debugging": "opencode/gpt-5-nano"
+  }
+}

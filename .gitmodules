@@ -1,0 +1,3 @@
+[submodule "vendor/antfu-skills"]
+	path = vendor/antfu-skills
+	url = git@github.com:antfu/skills.git
