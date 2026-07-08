@@ -35,7 +35,26 @@ echo "  ✅ opencode/opencode.json generated"
 echo ""
 
 # ──────────────────────────────────────────────
-#  3.  Submodules
+#  3.  Compile claude/settings.json from template
+# ──────────────────────────────────────────────
+echo "◆ Compiling claude/settings.json from template..."
+sed -e "s|{{ANTHROPIC_AUTH_TOKEN}}|${ANTHROPIC_AUTH_TOKEN:-}|g" \
+    -e "s|{{ANTHROPIC_BASE_URL}}|${ANTHROPIC_BASE_URL:-}|g" \
+    -e "s|{{ANTHROPIC_MODEL}}|${ANTHROPIC_MODEL:-}|g" \
+    -e "s|{{ANTHROPIC_DEFAULT_SONNET_MODEL}}|${ANTHROPIC_DEFAULT_SONNET_MODEL:-}|g" \
+    -e "s|{{ANTHROPIC_DEFAULT_HAIKU_MODEL}}|${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}|g" \
+    -e "s|{{ANTHROPIC_SMALL_FAST_MODEL}}|${ANTHROPIC_SMALL_FAST_MODEL:-}|g" \
+    -e "s|{{HTTP_PROXY}}|${HTTP_PROXY:-}|g" \
+    -e "s|{{HTTPS_PROXY}}|${HTTPS_PROXY:-}|g" \
+    -e "s|{{NO_PROXY}}|${NO_PROXY:-}|g" \
+    -e "s|{{REPO_DIR}}|${REPO_DIR}|g" \
+    "$REPO_DIR/claude/settings.json.template" \
+    > "$REPO_DIR/claude/settings.json"
+echo "  ✅ claude/settings.json generated"
+echo ""
+
+# ──────────────────────────────────────────────
+#  5.  Submodules
 # ──────────────────────────────────────────────
 if [ ! -f "$REPO_DIR/vendor/antfu-skills/skills/antfu/SKILL.md" ]; then
   echo "◆ Initializing git submodule (vendor/antfu-skills)..."
@@ -45,7 +64,7 @@ if [ ! -f "$REPO_DIR/vendor/antfu-skills/skills/antfu/SKILL.md" ]; then
 fi
 
 # ──────────────────────────────────────────────
-#  4.  Vendor symlinks (in-repo only)
+#  6.  Vendor symlinks (in-repo only)
 # ──────────────────────────────────────────────
 echo "◆ Syncing vendor skill symlinks..."
 VENDOR_DIR="$REPO_DIR/vendor/antfu-skills/skills"
@@ -65,7 +84,7 @@ done
 echo ""
 
 # ──────────────────────────────────────────────
-#  5.  Git pre-commit hook
+#  7.  Git pre-commit hook
 # ──────────────────────────────────────────────
 if git rev-parse --git-dir >/dev/null 2>&1; then
   git config core.hooksPath scripts/git-hooks
@@ -74,7 +93,7 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 # ──────────────────────────────────────────────
-#  6.  Add repo skills to existing agent config
+#  8.  Add repo skills to existing agent config
 # ──────────────────────────────────────────────
 ORIG_CONFIG="$HOME/.config/opencode/opencode.json"
 MODIFIED=0
@@ -86,7 +105,7 @@ if [ -f "$ORIG_CONFIG" ]; then
 fi
 
 # ──────────────────────────────────────────────
-#  7.  Summary
+#  9.  Summary
 # ──────────────────────────────────────────────
 echo "╔════════════════════════════════════════╗"
 echo "║   Setup complete                       ║"

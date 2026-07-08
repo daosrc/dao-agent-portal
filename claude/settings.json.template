@@ -1,0 +1,38 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "{{ANTHROPIC_AUTH_TOKEN}}",
+    "ANTHROPIC_BASE_URL": "{{ANTHROPIC_BASE_URL}}",
+    "ANTHROPIC_MODEL": "{{ANTHROPIC_MODEL}}",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "{{ANTHROPIC_DEFAULT_SONNET_MODEL}}",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "{{ANTHROPIC_DEFAULT_HAIKU_MODEL}}",
+    "ANTHROPIC_SMALL_FAST_MODEL": "{{ANTHROPIC_SMALL_FAST_MODEL}}",
+    "HTTP_PROXY": "{{HTTP_PROXY}}",
+    "HTTPS_PROXY": "{{HTTPS_PROXY}}",
+    "NO_PROXY": "{{NO_PROXY}}"
+  },
+  "permissions": {
+    "allow": [
+      "mcp__codegraph__codegraph_explore",
+      "mcp__codegraph__codegraph_search",
+      "mcp__codegraph__codegraph_node",
+      "mcp__codegraph__codegraph_callers",
+      "mcp__codegraph__codegraph_callees",
+      "mcp__codegraph__codegraph_impact",
+      "mcp__codegraph__codegraph_files",
+      "mcp__codegraph__codegraph_status"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
+  },
+  "model": "haiku",
+  "statusLine": {
+    "type": "command",
+    "command": "sh {{REPO_DIR}}/claude/statusline-command.sh"
+  },
+  "companyAnnouncements": [
+    "您正在使用 七牛云提供  API 🚀"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Skill(agent-browser)",
+      "Bash(agent-browser get:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(npx skills:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:hub.docker.com)",
+      "WebFetch(domain:docs.openclaw.ai)",
+      "WebFetch(domain:openclaw.ai)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:hermes-agent.nousresearch.com)",
+      "WebFetch(domain:ghcr.io)",
+      "Bash(curl -s --max-time 10 \"https://search.sapti.me/search?q=%E4%BC%8A%E6%9C%97+%E5%B1%80%E5%8A%BF+2026&categories=news&time_range=month&language=zh&format=json\")",
+      "Bash(python3 -c ' *)",
+      "WebFetch(domain:news.google.com)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d, indent=2, ensure_ascii=False\\)\\)\")",
+      "Bash(python3 -c \" import json, sys d = json.load\\(sys.stdin\\) mcp = d.get\\('mcpServers', {}\\) print\\('当前已配置的 MCP 服务器:'\\) if mcp: for name, config in mcp.items\\(\\): print\\(f' - {name}: {json.dumps\\(config, ensure_ascii=False\\)[:100]}'\\) else: print\\(' （无）'\\) \")"
+    ]
+  }
+}
