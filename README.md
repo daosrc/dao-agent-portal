@@ -27,10 +27,16 @@ dao-agent-portal/
 │   └── models.json
 │
 ├── claude/                       # Claude Desktop config reference
+│   ├── settings.json.template    # Compiled from .env by bootstrap
+│   ├── settings.local.json       # Permission overrides
+│   ├── claude_desktop_config.json
+│   ├── statusline-command.sh
+│   └── plugins/                  # Plugin marketplace metadata (backup)
 │
 └── scripts/
     ├── git-hooks/pre-commit      # Secret-leak prevention
-    └── add-repo-to-config.py     # Modify opencode.json safely
+    ├── add-repo-to-config.py     # Modify opencode.json safely
+    └── sync-claude-skills.sh     # Sync repo skills → ~/.claude/skills
 ```
 
 ## Setup
@@ -79,6 +85,23 @@ If you used `--link` mode (optional full takeover):
 rm ~/.config/opencode && cp -a ~/dotfiles-backup/opencode ~/.config/opencode
 rm ~/.claude/skills && cp -a ~/dotfiles-backup/claude-skills ~/.claude/skills
 ```
+
+## Sync Skills to Claude Code
+
+Claude Code loads skills from `~/.claude/skills/` (no config key). To make repo skills available to Claude without replacing your existing setup:
+
+```bash
+# Link repo-unique skills (skips existing ones, non-destructive)
+./scripts/sync-claude-skills.sh
+
+# Force overwrite existing skills
+./scripts/sync-claude-skills.sh --force
+
+# Restore: remove only the symlinks that point to the repo
+./scripts/sync-claude-skills.sh restore
+```
+
+The script respects existing skills — `image-ocr`, `hackernews`, `agent-browser` etc. are **skipped** unless you pass `--force`. Restore removes only repo-linked skills and leaves your originals intact.
 
 ## Secrets Protection
 
