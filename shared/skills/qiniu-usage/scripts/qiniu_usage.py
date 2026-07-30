@@ -54,6 +54,7 @@ DEFAULT_USD_TO_CNY = 7.25
 DEFAULT_PRICING = {
     # Claude 4 Series
     "claude-4.6-sonnet": {"input": 3.0, "output": 15.0},
+    "anthropic/claude-sonnet-5": {"input": 3.0, "output": 15.0},
     "claude-4.6-opus": {"input": 15.0, "output": 75.0},
     "claude-4.5-sonnet": {"input": 3.0, "output": 15.0},
     "claude-4.5-haiku": {"input": 1.0, "output": 5.0},
@@ -86,6 +87,7 @@ DEFAULT_PRICING = {
     "deepseek-v3": {"input": 0.278, "output": 1.11},
     "deepseek-v3.1": {"input": 0.556, "output": 1.67},
     "deepseek-r1": {"input": 0.556, "output": 2.22},
+    "deepseek/deepseek-v4-pro-202606": {"input": 0.4348, "output": 0.8696},
     # Doubao
     "doubao-1.5-pro-32k": {"input": 0.111, "output": 0.278},
     "doubao-seed-1.6": {"input": 0.111, "output": 0.278},
@@ -104,6 +106,7 @@ DEFAULT_PRICING = {
     "viduq3-pro": {"input": 0.061, "output": 0.130},
     # Z-AI Text Models
     "z-ai/glm-5.2": {"input": 0.97, "output": 3.89},
+    "anthropic/claude-fable-5": {"input": 10.0, "output": 50.0},
 }
 
 # Manual price overrides — authoritative source: anthropic.com/pricing + sufy.com
@@ -113,6 +116,8 @@ DEFAULT_PRICING = {
 PRICE_OVERRIDES = {
     # Claude 4 current models (source: anthropic.com/pricing)
     "claude-4.6-sonnet":          {"input": 3.0,  "output": 15.0},
+    # Anthropic Claude Sonnet 5 (source: qiniu pricing) — 非缓存输入 $3.00/M, 缓存输入 $0.30/M, 输出 $15.00/M
+    "anthropic/claude-sonnet-5":  {"input": 3.0,  "output": 15.0},
     "claude-4.8-opus":            {"input": 5.0,  "output": 25.0},
     "claude-4.7-opus":            {"input": 5.0,  "output": 25.0},
     "claude-4.5-sonnet":          {"input": 3.0,  "output": 15.0},
@@ -130,12 +135,17 @@ PRICE_OVERRIDES = {
     "gemini-3.1-pro-image":              {"input": 2.00, "output": 12.0},
     "gemini-3.5-flash":                  {"input": 0.50, "output": 9.0},
     # DeepSeek V4 (source: sufy.com, confirmed from screenshot)
+    "deepseek/deepseek-v4-pro-202606": {"input": 0.4348, "output": 0.8696},
     "deepseek/deepseek-v4-pro":   {"input": 1.67, "output": 3.33},
     "deepseek-v4-pro":            {"input": 1.67, "output": 3.33},
     "deepseek/deepseek-v4-flash": {"input": 0.14, "output": 0.28},
     "deepseek-v4-flash":          {"input": 0.14, "output": 0.28},
     # Z-AI/GLM-5.2 non-cached input (sufy.com only exposes cached input via static HTML)
     "z-ai/glm-5.2":              {"input": 0.97, "output": 3.89},
+    # Anthropic Claude Fable 5 (source: qiniu pricing screenshot)
+    #   非缓存输入 $10.00/M | 缓存输入 $1.00/M | 缓存创建 $12.50/M | 1h缓存创建 $20.00/M
+    #   输出 $50.00/M | 联网搜索 $0.01/次
+    "anthropic/claude-fable-5": {"input": 10.0, "output": 50.0},
     # Video Generation models — priced per second, included for reference
     "kling-video/kling-3.0-turbo": {"input": 0.111, "output": 0.139},
     "vidu/viduq3":                {"input": 0.030, "output": 0.052},
@@ -392,23 +402,28 @@ def find_pricing(model_id: str, prices: dict) -> Optional[dict]:
     """Find pricing for a model, trying various matching strategies."""
     model_lower = normalize_model_name(model_id)
 
-    # Exact match
-    if model_lower in prices:
-        return prices[model_lower]
+    # Build normalized key index for exact matching
+    normalized = {normalize_model_name(k): k for k in prices}
+    if model_lower in normalized:
+        return prices[normalized[model_lower]]
 
-    # Try partial matching for common model name variations
+    # Try partial matching — prefer most specific (longest key) match
+    candidates = []
     for key in prices:
-        # Check if key is a substring of model name or vice versa
-        if key in model_lower or model_lower in key:
-            return prices[key]
-        # Check if most significant parts match
-        key_parts = set(key.split("-"))
+        key_lower = normalize_model_name(key)
+        if key_lower in model_lower or model_lower in key_lower:
+            candidates.append(key)
+            continue
+        key_parts = set(key_lower.split("-"))
         model_parts = set(model_lower.split("-"))
-        # If key parts are subset of model parts
         if key_parts and key_parts.issubset(model_parts):
-            return prices[key]
+            candidates.append(key)
 
-    return None
+    if not candidates:
+        return None
+    # Return the most specific (longest key) match
+    candidates.sort(key=len, reverse=True)
+    return prices[candidates[0]]
 
 
 def calculate_cost(

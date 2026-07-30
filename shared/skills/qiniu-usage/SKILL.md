@@ -172,6 +172,8 @@ Prices are sourced from [sufy.com](https://sufy.com/zh-CN/services/ai-inference/
 
 | Model | Input ($/M) | Output ($/M) | Input (¥/M) | Output (¥/M) |
 |-------|-------------|--------------|-------------|--------------|
+| claude-sonnet-5 | 3.0 | 15.0 | ~21.75 | ~108.75 |
+| claude-fable-5 | 10.0 | 50.0 | ~72.50 | ~362.50 |
 | claude-4.6-sonnet | 3.0 | 15.0 | ~21.75 | ~108.75 |
 | claude-4.6-opus | 15.0 | 75.0 | ~108.75 | ~543.75 |
 | claude-4.5-sonnet | 3.0 | 15.0 | ~21.75 | ~108.75 |
