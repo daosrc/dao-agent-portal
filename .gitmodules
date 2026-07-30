@@ -1,3 +1,6 @@
 [submodule "vendor/antfu-skills"]
 	path = vendor/antfu-skills
 	url = git@github.com:antfu/skills.git
+[submodule "vendor/figma-mcp-server-guide"]
+	path = vendor/figma-mcp-server-guide
+	url = https://github.com/figma/mcp-server-guide.git

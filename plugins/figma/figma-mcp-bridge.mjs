@@ -1,49 +1,44 @@
 #!/usr/bin/env node
-// Figma MCP Bridge — wraps Figma Dev Mode MCP (SSE) as stdio MCP server
-// Add to opencode.json mcp section:
-//   "figma-bridge": { "type": "local", "command": ["node", "/path/to/figma-mcp-bridge.mjs"], "enabled": true }
+// Figma MCP Bridge — wraps Figma Desktop MCP (Streamable HTTP) as stdio MCP server
 
 import http from 'node:http';
-import { EOL } from 'node:os';
 
 const FIGMA_MCP_URL = process.env.FIGMA_MCP_URL || 'http://127.0.0.1:3845/mcp';
 const { hostname, port, pathname } = new URL(FIGMA_MCP_URL);
 
-class FigmaSSEClient {
+class FigmaClient {
   #sessionId = null;
 
   async init() {
-    const { headers, body } = await this.#post({
-      jsonrpc: '2.0', id: 1, method: 'initialize',
-      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'figma-bridge', version: '1.0' } }
-    }, 10000);
-    this.#sessionId = headers['mcp-session-id'];
-    if (!this.#sessionId) throw new Error(`No session: ${JSON.stringify(headers)}`);
-    for (const line of body.split('\n')) {
-      if (line.startsWith('data: ')) return JSON.parse(line.slice(5));
-    }
-    throw new Error('No data in init response');
+    const res = await this.#request({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'figma-bridge', version: '1.0' } } }, 10000);
+    this.#sessionId = res.headers['mcp-session-id'];
+    return res.body;
+  }
+
+  async method(name, params = {}, timeout = 180000) {
+    return this.#request({ jsonrpc: '2.0', id: Date.now(), method: name, params }, timeout);
   }
 
   async call(name, args = {}, timeout = 180000) {
-    const { body } = await this.#post({
-      jsonrpc: '2.0', id: Date.now(), method: 'tools/call',
-      params: { name, arguments: args }
-    }, timeout);
-    for (const line of body.split('\n')) {
-      if (line.startsWith('data: ')) return JSON.parse(line.slice(5));
-    }
-    throw new Error('No data in tool response');
+    return this.#request({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: args } }, timeout);
   }
 
-  #post(body, timeout) {
+  #request(body, timeout) {
     return new Promise((resolve, reject) => {
-      const headers = { 'Accept': 'text/event-stream, application/json', 'Content-Type': 'application/json' };
+      const headers = { 'Accept': 'application/json, text/event-stream', 'Content-Type': 'application/json' };
       if (this.#sessionId) headers['mcp-session-id'] = this.#sessionId;
       const req = http.request({ hostname, port, path: pathname, method: 'POST', headers, timeout }, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve({ headers: res.headers, body: data }));
+        res.on('end', () => {
+          // Try SSE format first (event: message\ndata: {...}), then plain JSON
+          let parsed;
+          for (const line of data.split('\n')) {
+            if (line.startsWith('data: ')) { try { parsed = JSON.parse(line.slice(6)); } catch {} }
+          }
+          if (!parsed) { try { parsed = JSON.parse(data); } catch {} }
+          resolve({ headers: res.headers, body: parsed || { error: { code: -32603, message: 'Parse failed' } } });
+        });
       });
       req.on('error', reject);
       req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
@@ -55,30 +50,35 @@ class FigmaSSEClient {
 
 let figma;
 
-// MCP stdio protocol: read one JSON-RPC message from stdin
 function readStdinMessage() {
   return new Promise((resolve) => {
-    let contentLength = 0;
     let buf = '';
-
+    process.stdin.setEncoding('utf-8');
     process.stdin.on('data', (chunk) => {
-      buf += chunk.toString();
-      // Try to parse headers
-      while (buf.includes('\n')) {
+      buf += chunk;
+      // Split on newlines — each segment after an empty Content-Length separator
+      // OR a raw JSON line (no Content-Length)
+      let parsed = false;
+      while (buf.includes('\n') && !parsed) {
+        // Check for Content-Length header format first
+        const contentLenMatch = buf.match(/^Content-Length:\s*(\d+)\r?\n\r?\n/);
+        if (contentLenMatch) {
+          const len = parseInt(contentLenMatch[1], 10);
+          const headerEnd = contentLenMatch[0].length;
+          if (Buffer.byteLength(buf.slice(headerEnd), 'utf-8') >= len) {
+            const bodyStr = buf.slice(headerEnd, headerEnd + len);
+            buf = buf.slice(headerEnd + len);
+            try { resolve(JSON.parse(bodyStr)); parsed = true; } catch { resolve(null); parsed = true; }
+          }
+          break;
+        }
+        // No Content-Length header — try raw JSON line
         const idx = buf.indexOf('\n');
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
-
-        if (line.startsWith('Content-Length:')) {
-          contentLength = parseInt(line.slice(15).trim(), 10);
-        } else if (line === '') {
-          // End of headers, read body
-          if (contentLength > 0 && Buffer.byteLength(buf, 'utf-8') >= contentLength) {
-            const bodyStr = buf.slice(0, contentLength);
-            buf = buf.slice(contentLength);
-            try { resolve(JSON.parse(bodyStr)); } catch { resolve(null); }
-            return;
-          }
+        if (!line) continue;
+        if (line[0] === '{' || line[0] === '[') {
+          try { resolve(JSON.parse(line)); parsed = true; } catch { /* not valid JSON, skip */ }
         }
       }
     });
@@ -100,26 +100,29 @@ async function main() {
     try {
       switch (method) {
         case 'initialize':
-          figma = new FigmaSSEClient();
+          figma = new FigmaClient();
           const initResult = await figma.init();
           send({ jsonrpc: '2.0', id, result: initResult.result });
           break;
+
         case 'notifications/initialized':
           break;
+
         case 'tools/list':
-          send({ jsonrpc: '2.0', id, result: { tools: [
-            { name: 'get_screenshot', description: 'Get screenshot of a Figma node', inputSchema: { type: 'object', properties: { node_id: { type: 'string' }, figma_file_key: { type: 'string' } }, required: ['node_id', 'figma_file_key'] } },
-            { name: 'get_metadata', description: 'Get metadata of a Figma node', inputSchema: { type: 'object', properties: { node_id: { type: 'string' }, figma_file_key: { type: 'string' } }, required: ['node_id', 'figma_file_key'] } },
-            { name: 'get_design_context', description: 'Get design context (generated code, tokens) for a Figma node', inputSchema: { type: 'object', properties: { node_id: { type: 'string' }, figma_file_key: { type: 'string' }, disable_code_connect: { type: 'boolean' } }, required: ['node_id', 'figma_file_key'] } },
-          ]}});
-          break;
-        case 'tools/call': {
-          const toolName = params.name.includes('.') ? params.name.split('.').pop() : params.name;
-          const args = params.arguments || {};
-          const result = await figma.call(toolName, args);
-          send({ jsonrpc: '2.0', id, result: result.result || result });
+        case 'tools/call':
+        case 'resources/list':
+        case 'prompts/list': {
+          if (method === 'tools/call') {
+            const toolName = params.name.includes('.') ? params.name.split('.').pop() : params.name;
+            const result = await figma.call(toolName, params.arguments);
+            send({ jsonrpc: '2.0', id, result: result.body.result || result.body });
+          } else {
+            const result = await figma.method(method, params);
+            send({ jsonrpc: '2.0', id, result: result.body.result || result.body });
+          }
           break;
         }
+
         default:
           send({ jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown: ${method}` } });
       }
