@@ -146,6 +146,24 @@ PRICE_OVERRIDES = {
     #   非缓存输入 $10.00/M | 缓存输入 $1.00/M | 缓存创建 $12.50/M | 1h缓存创建 $20.00/M
     #   输出 $50.00/M | 联网搜索 $0.01/次
     "anthropic/claude-fable-5": {"input": 10.0, "output": 50.0},
+    # Anthropic Claude Opus 5 (source: qiniu pricing)
+    #   非缓存输入 $5.00/M | 缓存输入 $0.50/M | 缓存创建 $6.25/M | 1h缓存创建 $10.00/M
+    #   输出 $25.00/M | 联网搜索 $0.01/次
+    "anthropic/claude-opus-5": {"input": 5.0, "output": 25.0},
+    # OpenAI GPT-5.6 Luna (source: qiniu pricing)
+    #   非缓存输入 $0.20/M | 缓存输入 $0.02/M | 缓存创建 $0.25/M
+    #   输出 $1.20/M (≤272k) / $1.80/M (>272k)；长输入档 非缓存输入 $0.40/M
+    "openai/gpt-5.6-luna": {"input": 0.20, "output": 1.20},
+    # OpenAI GPT-5.6 Sol (source: qiniu pricing)
+    #   非缓存输入 $5.00/M | 缓存输入 $0.50/M | 缓存创建 $6.25/M
+    #   输出 $30.00/M (≤272k) / $45.00/M (>272k)；长输入档 非缓存输入 $10.00/M
+    "openai/gpt-5.6-sol": {"input": 5.0, "output": 30.0},
+    # Moonshot Kimi K3 (source: qiniu pricing)
+    #   非缓存输入 $2.8986/M | 缓存输入 $0.2899/M | 输出 $14.4928/M
+    "moonshotai/kimi-k3": {"input": 2.8986, "output": 14.4928},
+    # DeepSeek V4 Flash 20260731 (source: qiniu pricing)
+    #   非缓存输入 $0.1449/M | 缓存输入 $0.0029/M | 输出 $0.2899/M
+    "deepseek/deepseek-v4-flash-20260731": {"input": 0.1449, "output": 0.2899},
     # Video Generation models — priced per second, included for reference
     "kling-video/kling-3.0-turbo": {"input": 0.111, "output": 0.139},
     "vidu/viduq3":                {"input": 0.030, "output": 0.052},
