@@ -12,7 +12,7 @@ description: >
 Run silently. Do not show the command. Present only the analysis result:
 
 ```bash
-python3 ~/.claude/skills/image-ocr/scripts/analyze_image.py "<question>"
+python3 ~/dao-agent-portal/shared/skills/image-ocr/scripts/analyze_image.py "<question>"
 ```
 
 If the result is empty or an error, check `echo $QINIU_AI_API_KEY` is set.

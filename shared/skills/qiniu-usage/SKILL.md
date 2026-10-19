@@ -5,14 +5,16 @@ description: Query Qiniu AI API (api.qnaigc.com) token usage and calculate costs
 
 # Qiniu AI Usage Manager
 
-This skill queries token usage data from the Qiniu AI API (`api.qnaigc.com`) using the `/v2/stat/usage` endpoint and calculates costs based on model pricing.
+This skill queries Qiniu AI consumption via two paths:
+- **Token usage** (no cost): `/v2/stat/usage` — token counts per model without cost.
+- **Cost (费用)**: `/v3/stat/usage/apikey/cost-detail` — **官方真实账单**，直接返回人民币（CNY）费用，无需本地价格表或汇率换算。`--cost` 时自动走此接口。
 
 ## Features
 
 - **Token Usage Query**: Query usage by model, day, or time range
-- **Cost Calculation**: Show costs in USD and CNY (人民币)
-- **Live Exchange Rate**: Fetch real-time USD/CNY rate from API
-- **Price Management**: Update prices from sufy.com
+- **Cost Calculation**: 官方账单，费用以人民币（CNY）计
+- **Live Exchange Rate**: Fetch real-time USD/CNY rate from API（仅用于价格表换算）
+- **Price Management**: Update prices from sufy.com（仅 `--list-prices` / `--update-prices` 使用）
 - **Price Listing**: View all cached model prices with CNY conversion
 - **Daily Breakdown**: Day-by-day usage detail when querying multiple days
 
@@ -57,7 +59,7 @@ python3 scripts/qiniu_usage.py --month --cost
 python3 scripts/qiniu_usage.py --start 2026-02-01 --end 2026-02-25 --cost
 ```
 
-#### Update prices and exchange rate from sufy.com
+#### Update prices for all models (from the modelink.ai pricing API)
 ```bash
 python3 scripts/qiniu_usage.py --update-prices
 ```
@@ -93,7 +95,7 @@ python3 scripts/qiniu_usage.py --today --json
 | `--today` | Query today only | — |
 | `--month` | Query current month | — |
 | `--json` | Raw JSON output | — |
-| `--cost` | Show cost in USD and CNY | — |
+| `--cost` | Show cost from official v3 billing API (CNY人民币) | — |
 | `--update-prices` | Fetch latest prices from sufy.com | — |
 | `--update-rate` | Fetch latest USD/CNY exchange rate | — |
 | `--list-prices` | List all cached model prices | — |
@@ -124,24 +126,27 @@ python3 scripts/qiniu_usage.py --today --json
 
 ### With `--cost` flag
 
+> 走官方 `/v3/stat/usage/apikey/cost-detail` 账单接口，费用为真实人民币（CNY）。
+
 ```
   ═══════════════════════════════════════════════════════════════
-  Qiniu AI Token Usage Report
+  Qiniu AI Billing Report (官方账单)
   ═══════════════════════════════════════════════════════════════
-  Period      : 2026-02-26 ~ 2026-02-26
+  Period      : 2026-08-01 ~ 2026-08-07
   Granularity : day
-  Exchange    : 1 USD = ¥7.25 CNY
+  Currency    : CNY (人民币, 官方原价)
 
-  Model                      │           Tokens │       Cost (USD/CNY)
-  ───────────────────────────┼──────────────────┼─────────────────────
-  claude-4.6-sonnet          │      9.40 MToken │      $28.51 (¥206.7)
-  ───────────────────────────┼──────────────────┼─────────────────────
-  TOTAL                      │      9.40 MToken │      $28.51 (¥206.7)
+  Model                                    │           Tokens │         Cost (CNY)
+  ─────────────────────────────────────────┼──────────────────┼───────────────────
+  deepseek/deepseek-v4-flash-20260731      │     15.71 MToken │               4.33
+  deepseek/deepseek-v4-flash               │      1.43 MToken │               1.47
+  ─────────────────────────────────────────┼──────────────────┼───────────────────
+  TOTAL                                    │     17.14 MToken │ ¥             5.81
 
-  ─── Daily Breakdown (1 active days) ───
-  Date         │           Tokens │            Est. Cost
-  ─────────────┼──────────────────┼─────────────────────
-  2026-02-26   │      9.40 MToken │      $28.51 (¥206.7)
+  ─── Daily Breakdown (5 active days) ───
+  Date         │           Tokens │         Cost (CNY)
+  ─────────────┼──────────────────┼───────────────────
+  2026-08-03   │      1.53 MToken │ ¥             0.30
 ```
 
 ### With `--list-prices` flag
@@ -160,7 +165,29 @@ Cache file: ~/.cache/qiniu_prices.json
 
 ## Pricing Source
 
-Prices are sourced from [sufy.com](https://sufy.com/zh-CN/services/ai-inference/models) and cached locally at `~/.cache/qiniu_prices.json`.
+Prices are fetched **directly from the Modelink model-square API** and cached locally at `~/.cache/qiniu_prices.json`. Two sources are merged:
+
+1. `https://modelink.ai/zh-CN/models` — live model-square page; each model embeds a `pricingRules` JSON (includes brand-new models).
+2. `https://modelink.ai/historical-pricing.json` — single-request bulk file used to fill in older models.
+
+For each model the input price prefers 非缓存输入 (`ncache`) over 缓存输入 (`cache`). Prices are stored as USD per 1M tokens; the stored `input`/`output` are the **off-peak** values. Models with time-of-day pricing also carry `input_peak`/`output_peak`.
+
+`--update-prices` refreshes all models in one command; on API failure it falls back to scraping sufy.com.
+
+### Cost: official billing first, calculation as fallback
+
+`--cost` always prefers the **official v3 billing API** (`/v3/stat/usage/apikey/cost-detail`), which returns real CNY fees already broken down per model and per billing line (缓存输入 / 非缓存输入 / 输出, and 高峰 / 空闲). The report also prints a **高峰/空闲时段明细** section for time-of-day models.
+
+If the official billing API is unavailable, the script falls back to **estimating** from v2 token usage × the cached price table:
+- Time-of-day models (DeepSeek) are blended by the **peak-hour fraction** of the requested range.
+- Caveat: v2 usage does not separate cached vs non-cached input, so the fallback prices all input at the non-cached rate — it is an **upper-bound** estimate.
+
+### Peak / off-peak pricing (DeepSeek)
+
+DeepSeek models are billed by time of day (see the model page announcement):
+
+- **高峰 (peak)**: Monday–Friday **09:00–12:00** and **14:00–18:00** (Beijing time, UTC+8)
+- **空闲 (off-peak)**: all other hours (weekends + nights) — billed at the lower price
 
 ### Exchange Rate
 
@@ -183,6 +210,10 @@ Prices are sourced from [sufy.com](https://sufy.com/zh-CN/services/ai-inference/
 | deepseek-v3 | 0.278 | 1.11 | ~2.02 | ~8.05 |
 | deepseek-v3.1 | 0.556 | 1.67 | ~4.03 | ~12.11 |
 | deepseek-r1 | 0.556 | 2.22 | ~4.03 | ~16.10 |
+| deepseek-v4-flash-20260731 | 0.1449 | 0.5797 | ~0.97 | ~3.88 |
+| gpt-6-astra | 10.0 | 50.0 | ~67.00 | ~335.00 |
+| kimi-k3 | 2.899 | 14.493 | ~19.42 | ~97.10 |
+| deepseek-v4-pro | 1.67 | 3.33 | ~11.31 | ~22.54 |
 | qwen3-max | 0.833 | 3.33 | ~6.04 | ~24.14 |
 | glm-4.5 | 0.556 | 2.22 | ~4.03 | ~16.10 |
 | kimi-k2 | 0.556 | 2.22 | ~4.03 | ~16.10 |
@@ -193,7 +224,7 @@ Prices are sourced from [sufy.com](https://sufy.com/zh-CN/services/ai-inference/
 | gemini-3.1-flash-lite | 0.15 | 1.50 | ~1.09 | ~10.88 |
 | ... | ... | ... | ... | ... |
 
-Run `--update-prices` to fetch the latest pricing with current exchange rate from sufy.com.
+Run `--update-prices` to fetch the latest pricing for all models from the modelink.ai API.
 
 ## Workflow for the Agent
 

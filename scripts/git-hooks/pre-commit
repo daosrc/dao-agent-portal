@@ -15,10 +15,14 @@ SECRET_PATTERNS=(
   'ghu_[A-Za-z0-9_]{36}'           # GitHub user token
 )
 
-# Files that should NEVER be committed
-FORBIDDEN_FILES=(
+# Files / glob patterns that should NEVER be committed
+FORBIDDEN_PATTERNS=(
   '.env'
   'opencode/opencode.json'
+  'opencode/opencode.json.bak*'
+  'claude/settings.json'
+  '*.bak'
+  '*.bak.*'
 )
 
 violations=0
@@ -26,15 +30,21 @@ violations=0
 # Get staged files
 staged=$(git diff --cached --name-only)
 
-# ── Check forbidden files ──
-for file in "${FORBIDDEN_FILES[@]}"; do
-  if echo "$staged" | grep -Fx "$file" >/dev/null 2>&1; then
-    echo -e "${red}❌ FORBIDDEN: '$file' is staged for commit.${reset}"
-    echo "   This file is auto-generated or contains secrets."
-    echo "   Remove it from the staging area:"
-    echo "     git reset HEAD '$file'"
-    violations=$((violations + 1))
-  fi
+# ── Check forbidden files / patterns ──
+for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    # shellcheck disable=SC2254  # unquoted $pattern on purpose: glob match
+    case "$file" in
+      $pattern)
+        echo -e "${red}❌ FORBIDDEN: '$file' is staged for commit (matches '$pattern').${reset}"
+        echo "   This file is auto-generated, a local backup, or contains secrets."
+        echo "   Remove it from the staging area:"
+        echo "     git reset HEAD '$file'"
+        violations=$((violations + 1))
+        ;;
+    esac
+  done <<< "$staged"
 done
 
 # ── Check secret patterns in staged file contents ──

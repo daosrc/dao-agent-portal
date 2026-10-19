@@ -56,6 +56,11 @@
 | `disputes` | `POST /api/v1/work_relationships/{id}/dispute` | 发起纠纷 |
 | `disputes` | `GET /api/v1/disputes/{id}` | 纠纷详情 |
 | `remuneration_change_requests` | `POST /api/v1/work_relationships/{id}/remuneration_change_requests` | 申请改价 |
+| `purchase_relationships` | `GET /api/v1/purchase_relationships/{id}` | 购买关系（摊位订单）详情，含 addition_payments |
+| `purchase_relationships` | `PUT /api/v1/purchase_relationships/{id}/accept` | 接受订单 |
+| `purchase_relationships` | `PUT /api/v1/purchase_relationships/{id}/pass` | 通过节点 |
+| `purchase_relationships` | `PUT /api/v1/purchase_relationships/{id}/confirm` | 确认收稿 |
+| `purchase_relationships` | `GET /api/v1/purchase_relationships/{id}/snapshot` | 橱窗快照 |
 
 ## 摊位（Stall）
 
@@ -160,6 +165,7 @@
 | `dashboard` | `GET /api/v1/users/{id}/dashboard/work_relationships` | 工作关系总览 |
 | `dashboard` | `GET /api/v1/users/{id}/dashboard/projects` | 项目总览 |
 | `dashboard` | `GET /api/v1/users/{id}/dashboard/hire_relationships` | 雇佣关系总览 |
+| `dashboard` | `GET /api/v1/users/{id}/dashboard/purchase_relationships` | 购买关系（订单）总览 |
 | `dashboard` | `GET /api/v1/users/{id}/dashboard/reminder` | 待办提醒 |
 | `deadline_calendar` | `GET /api/v1/users/{id}/deadline_calendar/month` | 月度截止日历 |
 | `invite_calendars` | `GET /api/v1/invite_calendars` | 招募日历 |

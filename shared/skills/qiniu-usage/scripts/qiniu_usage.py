@@ -37,6 +37,10 @@ from typing import Optional
 BASE_URL = "https://api.qnaigc.com"
 USAGE_PATH = "/v2/stat/usage"
 PRICING_URL = "https://sufy.com/zh-CN/services/ai-inference/models"
+
+# Modelink 模型广场（Qiniu 模型定价的权威来源）— 页面内嵌 pricingRules JSON
+MODELINK_MODELS_URL = "https://modelink.ai/zh-CN/models"
+MODELINK_HISTORICAL_URL = "https://modelink.ai/historical-pricing.json"
 PRICES_CACHE_FILE = os.path.expanduser("~/.cache/qiniu_prices.json")
 CST = timezone(timedelta(hours=8))  # China Standard Time (UTC+8)
 
@@ -88,6 +92,7 @@ DEFAULT_PRICING = {
     "deepseek-v3.1": {"input": 0.556, "output": 1.67},
     "deepseek-r1": {"input": 0.556, "output": 2.22},
     "deepseek/deepseek-v4-pro-202606": {"input": 0.4348, "output": 0.8696},
+    "deepseek/deepseek-v4-flash-20260731": {"input": 0.1449, "output": 0.2899},
     # Doubao
     "doubao-1.5-pro-32k": {"input": 0.111, "output": 0.278},
     "doubao-seed-1.6": {"input": 0.111, "output": 0.278},
@@ -164,6 +169,10 @@ PRICE_OVERRIDES = {
     # DeepSeek V4 Flash 20260731 (source: qiniu pricing)
     #   非缓存输入 $0.1449/M | 缓存输入 $0.0029/M | 输出 $0.2899/M
     "deepseek/deepseek-v4-flash-20260731": {"input": 0.1449, "output": 0.2899},
+    # OpenAI GPT-6 Astra (source: modelink.ai / qiniu pricing)
+    #   非缓存输入 $10.00/M | 缓存输入 $1.00/M | 缓存创建 $12.50/M
+    #   输出 $50.00/M (≤272k) / $75.00/M (>272k)；长输入档 非缓存输入 $20.00/M
+    "openai/gpt-6-astra": {"input": 10.0, "output": 50.0},
     # Video Generation models — priced per second, included for reference
     "kling-video/kling-3.0-turbo": {"input": 0.111, "output": 0.139},
     "vidu/viduq3":                {"input": 0.030, "output": 0.052},
@@ -206,26 +215,31 @@ def _migrate_prices(prices: dict) -> dict:
 
 
 def load_prices() -> tuple[dict, float]:
-    """Load prices and exchange rate from cache or return defaults."""
+    """Load prices and exchange rate from cache or return defaults.
+
+    Cached prices (sourced from the modelink.ai pricing API via
+    `--update-prices`) are authoritative; the hardcoded PRICE_OVERRIDES only
+    fill in models the cache does not cover.
+    """
     if os.path.exists(PRICES_CACHE_FILE):
         try:
             with open(PRICES_CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 prices = _migrate_prices(data.get("prices", DEFAULT_PRICING))
-                # Apply overrides to correct prices that sufy.com only exposes via JS
-                prices.update(PRICE_OVERRIDES)
+                for name, pricing in PRICE_OVERRIDES.items():
+                    prices.setdefault(name, pricing)
                 return prices, data.get("exchange_rate", data.get("rate", DEFAULT_USD_TO_CNY))
         except (json.JSONDecodeError, IOError):
             pass
     return {**DEFAULT_PRICING, **PRICE_OVERRIDES}, DEFAULT_USD_TO_CNY
 
 
-def save_prices(prices: dict, exchange_rate: float) -> None:
+def save_prices(prices: dict, exchange_rate: float, source: str = MODELINK_MODELS_URL) -> None:
     """Save prices and exchange rate to cache file."""
     os.makedirs(os.path.dirname(PRICES_CACHE_FILE), exist_ok=True)
     data = {
         "updated": datetime.now(CST).isoformat(),
-        "source": PRICING_URL,
+        "source": source,
         "exchange_rate": exchange_rate,
         "prices": prices,
     }
@@ -312,6 +326,176 @@ def parse_html_prices(html: str) -> dict:
     return prices
 
 
+# ── Modelink 定价 API（权威来源） ─────────────────────────────────────────────
+
+
+# 输入价优先级：非缓存输入 > 普通输入 > 批量/思考输入 > 缓存输入
+# 闲时价为默认展示价（"input"/"output"），高峰价另存为 "input_peak"/"output_peak"
+_TOKEN_INPUT_KEYS = [
+    "ncache_offpeak", "ncache", "input", "bi_input", "th_input",
+    "cache_offpeak", "cache", "ncache_peak", "cache_peak",
+]
+_TOKEN_OUTPUT_KEYS = [
+    "output_offpeak", "output", "th_output", "bi_output", "output_peak",
+]
+# 仅在存在分时段（高峰/空闲）定价时才会命中的高峰键
+_TOKEN_INPUT_PEAK_KEYS = ["ncache_peak"]
+_TOKEN_OUTPUT_PEAK_KEYS = ["output_peak"]
+
+
+def _pick_token_price(rule: dict, keys: list) -> Optional[float]:
+    """Pick the USD-per-million price for the first matching token billing key."""
+    items = rule.get("items") or []
+    for key in keys:
+        for it in items:
+            if it.get("key") != key:
+                continue
+            unit_name = it.get("unitName") or it.get("pricing_name")
+            if unit_name != "token":
+                continue
+            usd = it.get("usdPerMillion")
+            if usd is None:
+                unit_price = it.get("unit_price_usd")
+                unit_size = it.get("unit_size") or 1000
+                if unit_price is not None:
+                    usd = unit_price * (1_000_000 / unit_size)
+            if usd is not None:
+                return usd
+    return None
+
+
+def _extract_price_from_rules(rules: list) -> Optional[dict]:
+    """Extract USD-per-million prices from a pricingRules array.
+
+    Returns {"input", "output"} (off-peak / standard). Models with time-of-day
+    pricing (DeepSeek 高峰/空闲) also carry "input_peak"/"output_peak".
+    """
+    for rule in rules or []:
+        inp = _pick_token_price(rule, _TOKEN_INPUT_KEYS)
+        out = _pick_token_price(rule, _TOKEN_OUTPUT_KEYS)
+        peak_in = _pick_token_price(rule, _TOKEN_INPUT_PEAK_KEYS)
+        peak_out = _pick_token_price(rule, _TOKEN_OUTPUT_PEAK_KEYS)
+        if inp is None and out is None and peak_in is None and peak_out is None:
+            continue
+        pricing = {"input": inp or 0.0, "output": out or 0.0}
+        if peak_in is not None:
+            pricing["input_peak"] = peak_in
+        if peak_out is not None:
+            pricing["output_peak"] = peak_out
+        return pricing
+    return None
+
+
+def parse_modelink_models(html: str) -> dict:
+    """Parse all model prices from the modelink.ai model-square page.
+
+    The Next.js page embeds each model object (id, aliases, pricingRules) as
+    JSON-escaped flight data.
+    """
+    prices = {}
+    s = html.replace('\\"', '"').replace('\\\\', '\\')
+
+    id_pos = [m.start() for m in re.finditer(r'"id":"', s)]
+    id_pos.append(len(s))
+    for k in range(len(id_pos) - 1):
+        seg = s[id_pos[k]:id_pos[k + 1]]
+        mi = re.match(r'"id":"([^"]+)"', seg)
+        if not mi:
+            continue
+        model_id = mi.group(1)
+
+        alias_match = re.search(r'"aliases":\[([^\]]*)\]', seg)
+        aliases = re.findall(r'"([^"]+)"', alias_match.group(1)) if alias_match else []
+
+        pr = seg.find('"pricingRules":[')
+        if pr < 0:
+            continue
+        j = seg.index('[', pr)
+        depth = 0
+        end = None
+        for e in range(j, len(seg)):
+            if seg[e] == '[':
+                depth += 1
+            elif seg[e] == ']':
+                depth -= 1
+                if depth == 0:
+                    end = e
+                    break
+        if end is None:
+            continue
+        try:
+            rules = json.loads(seg[j:end + 1])
+        except json.JSONDecodeError:
+            continue
+
+        pricing = _extract_price_from_rules(rules)
+        if pricing:
+            for name in [model_id] + aliases:
+                prices[name] = pricing
+    return prices
+
+
+def parse_historical_pricing(data: dict) -> dict:
+    """Parse prices from modelink.ai/historical-pricing.json."""
+    prices = {}
+    for model_id, entry in (data.get("models") or {}).items():
+        pricing = _extract_price_from_rules(entry.get("rules") or [])
+        if pricing:
+            prices[model_id] = pricing
+    return prices
+
+
+def _http_get(url: str, timeout: int = 60) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "application/json,text/html,*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "ignore")
+
+
+def fetch_prices_from_api() -> tuple[dict, float]:
+    """Fetch model prices directly from the modelink.ai pricing APIs.
+
+    Source 1: the model-square page (live, includes brand-new models).
+    Source 2: historical-pricing.json (single request, fills in older models).
+    """
+    print("Fetching prices from modelink.ai API...", file=sys.stderr)
+    prices: dict = {}
+
+    try:
+        html = _http_get(MODELINK_MODELS_URL)
+        live = parse_modelink_models(html)
+        prices.update(live)
+        print(f"  live model-square: {len(live)} models", file=sys.stderr)
+    except Exception as e:
+        print(f"  live model-square failed: {e}", file=sys.stderr)
+
+    try:
+        hist_data = json.loads(_http_get(MODELINK_HISTORICAL_URL))
+        hist = parse_historical_pricing(hist_data)
+        added = 0
+        for name, pricing in hist.items():
+            if name not in prices:
+                prices[name] = pricing
+                added += 1
+        print(f"  historical-pricing.json: {len(hist)} models ({added} new)", file=sys.stderr)
+    except Exception as e:
+        print(f"  historical-pricing.json failed: {e}", file=sys.stderr)
+
+    if not prices:
+        print("API pricing unavailable; falling back to sufy.com scrape", file=sys.stderr)
+        return fetch_prices_from_web()
+
+    exchange_rate = get_exchange_rate()
+    save_prices(prices, exchange_rate)
+    return prices, exchange_rate
+
+
 def fetch_prices_from_web() -> tuple[dict, float]:
     """Fetch latest prices from sufy.com website."""
     print("Fetching prices from sufy.com...", file=sys.stderr)
@@ -342,12 +526,12 @@ def fetch_prices_from_web() -> tuple[dict, float]:
         print(f"Successfully fetched prices for {len(prices)} models", file=sys.stderr)
         # Apply overrides for models where sufy.com only exposes cached-input price via static HTML
         prices.update(PRICE_OVERRIDES)
-        save_prices(prices, exchange_rate)
+        save_prices(prices, exchange_rate, source=PRICING_URL)
         return prices, exchange_rate
     else:
         print("Could not parse prices from web page.", file=sys.stderr)
         print("Using default pricing.", file=sys.stderr)
-        save_prices(DEFAULT_PRICING, exchange_rate)
+        save_prices(DEFAULT_PRICING, exchange_rate, source=PRICING_URL)
         return DEFAULT_PRICING, exchange_rate
 
 
@@ -401,16 +585,210 @@ def fetch_usage(api_key: str, granularity: str, start: datetime, end: datetime) 
         headers={"Authorization": f"Bearer {api_key}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             body = resp.read().decode()
             return json.loads(body)
     except urllib.error.HTTPError as e:
         body = e.read().decode()
-        print(f"HTTP {e.code}: {body}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Usage HTTP {e.code}: {body}", file=sys.stderr)
+        return {"status": False, "error": f"HTTP {e.code}"}
     except Exception as e:
-        print(f"Request failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Usage request failed: {e}", file=sys.stderr)
+        return {"status": False, "error": str(e)}
+
+
+# ── V3 Official Billing API (真实账单，费用以人民币计) ────────────────────────
+
+
+V3_COST_DETAIL_PATH = "/v3/stat/usage/apikey/cost-detail"
+
+
+def fetch_v3_cost_detail(api_key: str, start: datetime, end: datetime, grain: str = "day") -> dict:
+    """Query official billing detail via /v3/stat/usage/apikey/cost-detail.
+
+    Returns fee in CNY directly — no local price table or exchange rate needed.
+    """
+    params = urllib.parse.urlencode(
+        {
+            "start_date": start.strftime("%Y-%m-%d"),
+            "end_date": end.strftime("%Y-%m-%d"),
+            "grain": grain,
+        }
+    )
+    url = f"{BASE_URL}{V3_COST_DETAIL_PATH}?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        print(f"V3 billing HTTP {e.code}: {e.read().decode()}", file=sys.stderr)
+        return {"status": False, "error": f"HTTP {e.code}"}
+    except Exception as e:
+        print(f"V3 billing request failed: {e}", file=sys.stderr)
+        return {"status": False, "error": str(e)}
+
+
+def _is_token_unit(unit: str) -> bool:
+    return "token" in (unit or "").lower()
+
+
+def aggregate_v3_bills(data: dict) -> tuple[dict, list]:
+    """Aggregate v3 cost-detail bills into per-model summary + per-date breakdown.
+
+    Returns (models_summary, daily). Costs are in CNY (人民币).
+    """
+    models: dict[str, dict] = {}
+    daily: dict[str, dict] = {}
+
+    bills = data.get("data", {}).get("bills", [])
+    for bill in bills:
+        date = bill.get("date")
+        for model in bill.get("models", []):
+            mid = model.get("model_id", "unknown")
+            m = models.setdefault(
+                mid, {"model": mid, "tokens": 0.0, "fee": 0.0, "peak": 0.0, "offpeak": 0.0}
+            )
+            m["fee"] += model.get("total_fee", 0.0) or 0.0
+            for item in model.get("items") or []:
+                usage = item.get("usage", {})
+                if _is_token_unit(usage.get("unit")):
+                    count = usage.get("count", 0.0) or 0.0
+                    m["tokens"] += count
+                    item_key = item.get("key") or ""
+                    if item_key.endswith("_peak"):
+                        m["peak"] += count
+                    elif item_key.endswith("_offpeak"):
+                        m["offpeak"] += count
+            if date:
+                d = daily.setdefault(date, {"tokens": 0.0, "fee": 0.0})
+                d["fee"] += model.get("total_fee", 0.0) or 0.0
+                for item in model.get("items") or []:
+                    usage = item.get("usage", {})
+                    if _is_token_unit(usage.get("unit")):
+                        d["tokens"] += usage.get("count", 0.0) or 0.0
+
+    models_summary = sorted(models.values(), key=lambda x: x["fee"], reverse=True)
+    return models_summary, daily
+
+
+def print_v3_report(models_summary: list, daily: dict, start: datetime, end: datetime, grain: str) -> None:
+    """Print cost report from official v3 billing API (CNY)."""
+    print()
+    print(f"  ═══════════════════════════════════════════════════════════════")
+    print(f"  Qiniu AI Billing Report (官方账单)")
+    print(f"  ═══════════════════════════════════════════════════════════════")
+    print(f"  Period      : {start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}")
+    print(f"  Granularity : {grain}")
+    print(f"  Currency    : CNY (人民币, 官方原价)")
+    print()
+
+    if not models_summary:
+        print("  No billing data found.")
+        return
+
+    col_model = max(18, max(len(m["model"]) for m in models_summary))
+    col_tokens = 16
+    col_cost = 18
+
+    print(f"  {'Model':<{col_model}} │ {'Tokens':>{col_tokens}} │ {'Cost (CNY)':>{col_cost}}")
+    print(f"  {'─' * col_model}─┼─{'─' * col_tokens}─┼─{'─' * col_cost}")
+
+    grand_tokens = 0.0
+    grand_fee = 0.0
+    for m in models_summary:
+        total_tokens = m["tokens"]
+        fee = m["fee"]
+        print(
+            f"  {m['model']:<{col_model}} │ {format_value(total_tokens):>{col_tokens}} │ {fee:>{col_cost}.2f}"
+        )
+        grand_tokens += total_tokens
+        grand_fee += fee
+
+    print(f"  {'─' * col_model}─┼─{'─' * col_tokens}─┼─{'─' * col_cost}")
+    print(
+        f"  {'TOTAL':<{col_model}} │ {format_value(grand_tokens):>{col_tokens}} │ ¥{grand_fee:>{col_cost-1}.2f}"
+    )
+    print()
+
+    # 高峰/空闲时段明细（DeepSeek 等分时段计价模型）
+    peak_models = [
+        m for m in models_summary if m.get("peak", 0.0) > 0 or m.get("offpeak", 0.0) > 0
+    ]
+    if peak_models:
+        pc = max(18, max(len(m["model"]) for m in peak_models))
+        print(f"  ─── 高峰 / 空闲时段明细 (Mon–Fri 09–12 & 14–18 = 高峰) ───")
+        print(f"  {'Model':<{pc}} │ {'高峰 Tokens':>{col_tokens}} │ {'空闲 Tokens':>{col_tokens}}")
+        print(f"  {'─' * pc}─┼─{'─' * col_tokens}─┼─{'─' * col_tokens}")
+        for m in peak_models:
+            print(
+                f"  {m['model']:<{pc}} │ {format_value(m['peak']):>{col_tokens}} │ {format_value(m['offpeak']):>{col_tokens}}"
+            )
+        print()
+
+    if daily:
+        active_dates = sorted(daily.keys())
+        print(f"  ─── Daily Breakdown ({len(active_dates)} active days) ───")
+        col_date = 12
+        col_tokens = 16
+        col_cost = 18
+        print(f"  {'Date':<{col_date}} │ {'Tokens':>{col_tokens}} │ {'Cost (CNY)':>{col_cost}}")
+        print(f"  {'─' * col_date}─┼─{'─' * col_tokens}─┼─{'─' * col_cost}")
+        for date in active_dates:
+            d = daily[date]
+            print(
+                f"  {date:<{col_date}} │ {format_value(d['tokens']):>{col_tokens}} │ ¥{d['fee']:>{col_cost-1}.2f}"
+            )
+        print()
+
+
+def render_v3_markdown(
+    models_summary: list,
+    daily: dict,
+    start: datetime,
+    end: datetime,
+    grain: str,
+) -> str:
+    """Render official v3 billing data as Markdown tables."""
+    esc = lambda s: str(s).replace("|", "\\|").replace("\n", " ")
+
+    lines = []
+    lines.append("### Qiniu AI Billing Report (官方账单)")
+    lines.append("")
+    lines.append(f"- **Period**: {start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}")
+    lines.append(f"- **Granularity**: {grain}")
+    lines.append(f"- **Currency**: CNY (人民币, 官方原价)")
+    lines.append("")
+
+    if not models_summary:
+        lines.append("No billing data found.")
+        return "\n".join(lines)
+
+    lines.append("| Model | Tokens | Cost (CNY) |")
+    lines.append("|---|---:|---:|")
+    grand_tokens = 0.0
+    grand_fee = 0.0
+    for m in sorted(models_summary, key=lambda x: x["fee"], reverse=True):
+        lines.append(f"| {esc(m['model'])} | {format_value(m['tokens'])} | {m['fee']:.2f} |")
+        grand_tokens += m["tokens"]
+        grand_fee += m["fee"]
+    lines.append(f"| **TOTAL** | **{format_value(grand_tokens)}** | **¥{grand_fee:.2f}** |")
+    lines.append("")
+
+    if daily:
+        active_dates = sorted(daily.keys())
+        lines.append(f"### Daily Breakdown ({len(active_dates)} active days)")
+        lines.append("")
+        lines.append("| Date | Tokens | Cost (CNY) |")
+        lines.append("|---|---:|---:|")
+        for date in active_dates:
+            d = daily[date]
+            lines.append(f"| {esc(date)} | {format_value(d['tokens'])} | ¥{d['fee']:.2f} |")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── Cost Calculation ────────────────────────────────────────────────────────
@@ -461,6 +839,160 @@ def calculate_cost(
     output_cost_usd = (output_ktokens / 1000.0) * pricing["output"]
 
     return input_cost_usd, output_cost_usd, True
+
+
+# ── 分时段（高峰 / 空闲）计价 ─────────────────────────────────────────────────
+# DeepSeek 官方规则（见 modelink 模型页公告）：
+#   高峰时段 = 每周一到周五 09:00–12:00 与 14:00–18:00（北京时间 UTC+8）；
+#   其余时段（含周末、夜间）按闲时价格计费。
+DEEPSEEK_PEAK_WEEKDAYS = {0, 1, 2, 3, 4}  # Monday=0 ... Friday=4
+DEEPSEEK_PEAK_HOUR_RANGES = [(9, 12), (14, 18)]
+
+
+def is_peak_time(dt: datetime) -> bool:
+    """Return True if `dt` falls in DeepSeek's peak window (Beijing time)."""
+    local = dt.astimezone(CST)
+    if local.weekday() not in DEEPSEEK_PEAK_WEEKDAYS:
+        return False
+    return any(start <= local.hour < end for start, end in DEEPSEEK_PEAK_HOUR_RANGES)
+
+
+def peak_hour_fraction(start: datetime, end: datetime) -> float:
+    """Fraction of hours in [start, end] that fall in DeepSeek's peak window."""
+    end_local = end.astimezone(CST)
+    if end_local <= start.astimezone(CST):
+        # Single-date request (start == end at 00:00) → treat as one full day
+        end_local = start.astimezone(CST) + timedelta(days=1)
+    total_seconds = (end_local - start.astimezone(CST)).total_seconds()
+    if total_seconds <= 0:
+        return 0.0
+    peak = 0
+    cur = start.astimezone(CST).replace(minute=0, second=0, microsecond=0)
+    while cur < end_local:
+        if is_peak_time(cur):
+            peak += 1
+        cur += timedelta(hours=1)
+    return peak / (total_seconds / 3600.0)
+
+
+def estimate_cost_blended(
+    model_id: str,
+    input_ktokens: float,
+    output_ktokens: float,
+    prices: dict,
+    peak_fraction: float,
+) -> tuple:
+    """Estimate USD cost from period totals, blending peak/off-peak prices.
+
+    `peak_fraction` is the fraction of the period that is peak time; models
+    without time-of-day pricing ignore it. Returns (cost_usd, pricing_found).
+    """
+    pricing = find_pricing(model_id, prices)
+    if not pricing:
+        return None, False
+
+    f = peak_fraction if ("input_peak" in pricing or "output_peak" in pricing) else 0.0
+    in_price = pricing["input"] * (1 - f) + pricing.get("input_peak", pricing["input"]) * f
+    out_price = pricing["output"] * (1 - f) + pricing.get("output_peak", pricing["output"]) * f
+
+    cost = (input_ktokens / 1000.0) * in_price + (output_ktokens / 1000.0) * out_price
+    return cost, True
+
+
+def extract_model_totals(usage_data: list) -> dict:
+    """Extract per-model (input_k, output_k) token totals from v2 usage data.
+
+    Prefers the item-level `total`; falls back to summing category values.
+    """
+    result = {}
+    for model in usage_data:
+        name = model.get("name", "unknown")
+        k_in = 0.0
+        k_out = 0.0
+        for item in model.get("items") or []:
+            item_name = item.get("name", "")
+            if "输入" in item_name or "input" in item_name.lower():
+                idx = 0
+            elif "输出" in item_name or "output" in item_name.lower():
+                idx = 1
+            else:
+                continue
+            total = item.get("total")
+            if total is None:
+                total = 0.0
+                for cat in item.get("categories") or []:
+                    for entry in cat.get("values") or []:
+                        total += entry.get("value", 0.0) or 0.0
+            if idx == 0:
+                k_in += total or 0.0
+            else:
+                k_out += total or 0.0
+        result[name] = (k_in, k_out)
+    return result
+
+
+def print_estimated_report(
+    usage_data: list,
+    prices: dict,
+    exchange_rate: float,
+    start: datetime,
+    end: datetime,
+    granularity: str,
+    note: str = "Estimated (上限估算：输入按非缓存单价，可能偏高)",
+) -> None:
+    """Print a fallback cost report estimated from token usage + price table."""
+    totals = extract_model_totals(usage_data)
+    peak_fraction = peak_hour_fraction(start, end)
+
+    print()
+    print(f"  ═══════════════════════════════════════════════════════════════")
+    print(f"  Qiniu AI Cost Report — {note}")
+    print(f"  ═══════════════════════════════════════════════════════════════")
+    print(f"  Period      : {start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}")
+    print(f"  Granularity : {granularity}")
+    print(f"  Exchange    : 1 USD = ¥{exchange_rate:.2f} CNY")
+    print(f"  Peak mix    : {peak_fraction * 100:.1f}% peak (Mon–Fri 09–12 & 14–18 Beijing)")
+    print()
+
+    if not totals:
+        print("  No usage data found.")
+        return
+
+    rows = []
+    for model_name, (k_in, k_out) in totals.items():
+        cost_usd, found = estimate_cost_blended(model_name, k_in, k_out, prices, peak_fraction)
+        rows.append(
+            {
+                "model": model_name,
+                "tokens": k_in + k_out,
+                "cost_usd": cost_usd if found else 0.0,
+                "found": found,
+            }
+        )
+
+    rows.sort(key=lambda r: r["tokens"], reverse=True)
+    col_model = max(18, max(len(r["model"]) for r in rows))
+    col_tokens = 18
+    col_cost = 22
+
+    print(f"  {'Model':<{col_model}} │ {'Tokens':>{col_tokens}} │ {'Cost (USD/CNY)':>{col_cost}}")
+    print(f"  {'─' * col_model}─┼─{'─' * col_tokens}─┼─{'─' * col_cost}")
+
+    grand_tokens = 0.0
+    grand_cost = 0.0
+    for r in rows:
+        cost_str = format_cost(r["cost_usd"], exchange_rate) if r["found"] else "N/A"
+        print(
+            f"  {r['model']:<{col_model}} │ {format_value(r['tokens']):>{col_tokens}} │ {cost_str:>{col_cost}}"
+        )
+        grand_tokens += r["tokens"]
+        grand_cost += r["cost_usd"]
+
+    print(f"  {'─' * col_model}─┼─{'─' * col_tokens}─┼─{'─' * col_cost}")
+    print(
+        f"  {'TOTAL':<{col_model}} │ {format_value(grand_tokens):>{col_tokens}} │ {format_cost(grand_cost, exchange_rate):>{col_cost}}"
+    )
+    print()
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -738,6 +1270,12 @@ def parse_args():
         "--json", action="store_true", dest="output_json", help="Output raw JSON"
     )
     parser.add_argument(
+        "--md",
+        action="store_true",
+        dest="output_markdown",
+        help="Output official billing as Markdown tables (uses v3 cost API)",
+    )
+    parser.add_argument(
         "--cost",
         "--price",
         action="store_true",
@@ -801,16 +1339,21 @@ def main():
         for name, pricing in sorted(prices.items()):
             input_cny = pricing["input"] * exchange_rate
             output_cny = pricing["output"] * exchange_rate
-            print(
+            line = (
                 f"  {name:<30} Input: ${pricing['input']:.3f} (¥{input_cny:.2f})  Output: ${pricing['output']:.3f} (¥{output_cny:.2f})"
             )
+            if "input_peak" in pricing or "output_peak" in pricing:
+                pin = pricing.get("input_peak", pricing["input"])
+                pout = pricing.get("output_peak", pricing["output"])
+                line += f"  | 高峰 In: ${pin:.3f}  Out: ${pout:.3f}"
+            print(line)
         print(f"\nTotal: {len(prices)} models")
         print(f"Cache file: {PRICES_CACHE_FILE}")
         return
 
     # Handle price update
     if args.update_prices:
-        prices, exchange_rate = fetch_prices_from_web()
+        prices, exchange_rate = fetch_prices_from_api()
         print(f"\n✓ Prices updated and cached to: {PRICES_CACHE_FILE}")
         print(f"✓ Total models: {len(prices)}")
         print(f"✓ Exchange rate: 1 USD = ¥{exchange_rate:.4f} CNY")
@@ -848,6 +1391,39 @@ def main():
 
     if args.output_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.output_markdown:
+        # Markdown 表格：走官方 v3 账单接口
+        grain = "day" if args.granularity == "day" else "month"
+        v3 = fetch_v3_cost_detail(api_key, start, end, grain)
+        if not v3.get("status"):
+            print(f"V3 billing API error: {v3}", file=sys.stderr)
+            sys.exit(1)
+        models_summary, daily = aggregate_v3_bills(v3)
+        print(render_v3_markdown(models_summary, daily, start, end, grain))
+    elif args.show_cost:
+        # 优先：官方 v3 账单接口（真实人民币费用，含高峰/空闲明细，无需价格表）
+        grain = "day" if args.granularity == "day" else "month"
+        v3 = fetch_v3_cost_detail(api_key, start, end, grain)
+        if v3.get("status") and v3.get("data", {}).get("bills"):
+            models_summary, daily = aggregate_v3_bills(v3)
+            print_v3_report(models_summary, daily, start, end, grain)
+        else:
+            # 兜底：官方账单不可用 → 用价格表估算（分时段模型按高峰占比折算）
+            print("Official billing unavailable; estimating from price table.", file=sys.stderr)
+            est_result = result
+            if args.granularity != "day":
+                day_result = fetch_usage(api_key, "day", start, end)
+                if day_result.get("status"):
+                    est_result = day_result
+            print_estimated_report(
+                est_result.get("data", []),
+                prices,
+                exchange_rate,
+                start,
+                end,
+                "day",
+                "Estimated (官方账单不可用；上限估算，输入按非缓存单价，可能偏高)",
+            )
     else:
         print_table(
             result.get("data", []),
