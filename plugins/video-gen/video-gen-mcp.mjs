@@ -5,8 +5,10 @@
 // and returns their absolute paths.
 //
 // Two backends are supported and auto-selected by model id:
-//   1. Seedance (Doubao/Dreamina) -> Fal queue: POST /queue/{vendor}/seedance-2.5/text-to-video
+//   1. Seedance (Doubao/Dreamina) -> Fal queue: POST /queue/{variant}/{route}
 //      Auth: `Authorization: Key {api_key}` (NOT Bearer)
+//      Variants: bytedance/seedance-2.0/mini, bytedance/seedance-2.0, bytedance/seedance-2.5
+//      Routes:   text-to-video, image-to-video, reference-to-video
 //   2. Kling / Sora               -> OpenAI-style: POST /videos
 //      Auth: `Authorization: Bearer {api_key}`
 
@@ -46,53 +48,84 @@ const CFG = loadConfig();
 // baseURL may include "/v1" (OpenAI-style). Seedance's Fal queue lives at the root (no /v1),
 // while Kling's /videos lives under /v1. Derive a root host for the Fal queue.
 const ROOT_BASE = CFG.baseURL.replace(/\/v1\/?$/, '');
-const DEFAULT_MODEL = process.env.VIDEO_GEN_MODEL || 'kling-video-o1';
+const DEFAULT_MODEL = process.env.VIDEO_GEN_MODEL || 'bytedance/doubao-seedance-2-0-mini-260615';
 const DEFAULT_OUT_DIR = process.env.VIDEO_GEN_OUT_DIR || path.join(os.homedir(), 'Downloads');
 const DEFAULT_POLL_INTERVAL_MS = 10000;
 const DEFAULT_POLL_TIMEOUT_MS = 900000; // 15 min
+const SEEDANCE_DEFAULT_RESOLUTION = '720p';
 
 // --- Model routing ----------------------------------------------------------
+// Fal-queue variants of the Seedance family. `path` is the queue segment after /queue/.
+// Capability values mirror the Modelink OpenAPI spec (docs.modelink.ai/openapi.json).
+const SEEDANCE_VARIANTS = {
+  '2.0-mini': {
+    label: 'Seedance 2.0 Mini',
+    path: 'bytedance/seedance-2.0/mini',
+    resolutions: ['480p', '720p'],
+    minDuration: 4,
+    maxDuration: 15,
+  },
+  '2.0-fast': {
+    label: 'Seedance 2.0 Fast',
+    path: 'bytedance/seedance-2.0/fast',
+    resolutions: ['480p', '720p'],
+    minDuration: 4,
+    maxDuration: 15,
+  },
+  '2.0': {
+    label: 'Seedance 2.0',
+    path: 'bytedance/seedance-2.0',
+    resolutions: ['480p', '720p', '1080p', '4k'],
+    minDuration: 4,
+    maxDuration: 15,
+  },
+  '2.5': {
+    label: 'Seedance 2.5',
+    path: 'bytedance/seedance-2.5',
+    resolutions: ['480p', '720p', '1080p'],
+    minDuration: 4,
+    maxDuration: 30,
+  },
+};
+
 function isSeedanceModel(model = '') {
   const m = model.toLowerCase();
-  return m.includes('seedance') || m.includes('dreamina') || m.includes('doubao-seedance')
-    || m.includes('doubao/seedance') || m.includes('bytedance/seedance');
+  return m.includes('seedance') || m.includes('dreamina');
 }
 
-function isDreaminaModel(model = '') {
+// Resolve a model id to a Seedance variant key, or null when the model is not Seedance.
+function seedanceVariant(model = '') {
+  if (!isSeedanceModel(model)) return null;
   const m = model.toLowerCase();
-  return m.includes('dreamina') || m.includes('byteplus');
+  if (/2[-_. ]?0[-_. ]?mini/.test(m)) return '2.0-mini';
+  if (/2[-_. ]?0[-_. ]?(fast|turbo)/.test(m)) return '2.0-fast';
+  if (/2[-_. ]?5/.test(m)) return '2.5';
+  if (/2[-_. ]?0/.test(m)) return '2.0';
+  return '2.5'; // bare `doubao-seedance` / `dreamina-seedance`
 }
 
 // --- Seedance (Fal queue) ---------------------------------------------------
-async function seedanceCreateJob({ prompt, seconds, size, resolution, aspectRatio, generateAudio }) {
-  const url = `${ROOT_BASE}/queue/bytedance/seedance-2.5/text-to-video`;
-  const body = { prompt };
-  const res = resolution || sizeToResolution(size);
-  if (res) body.resolution = res;
-  if (seconds) body.duration = String(seconds);
-  const ar = aspectRatio || sizeToAspectRatio(size);
-  if (ar) body.aspect_ratio = ar;
-  if (generateAudio != null) body.generate_audio = !!generateAudio;
+const SEEDANCE_ROUTES = ['text-to-video', 'image-to-video', 'reference-to-video'];
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Key ${CFG.apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`Seedance API error ${resp.status}: ${text.slice(0, 500)}`);
-  const data = JSON.parse(text);
-  if (!data?.request_id) throw new Error(`No request_id returned: ${text.slice(0, 300)}`);
-  return data; // { status: IN_QUEUE, request_id, status_url, response_url }
+// Choose the queue route from the supplied inputs, unless the caller forces one.
+function seedanceRoute({ imageUrls = [], videoUrls = [], requested = 'auto' } = {}) {
+  const imgs = imageUrls.filter(Boolean);
+  const vids = videoUrls.filter(Boolean);
+  if (requested && requested !== 'auto') return requested;
+  if (vids.length) return 'reference-to-video';
+  if (imgs.length >= 3) return 'reference-to-video';
+  if (imgs.length) return 'image-to-video'; // 1 = first frame, 2 = first + last frame
+  return 'text-to-video';
 }
 
+// Resolution class is set by the short side: 1280x720 = 720p, 1920x1080 = 1080p, 1080x1080 = 1080p.
 function sizeToResolution(size) {
   if (!size) return undefined;
   const [w, h] = String(size).toLowerCase().split('x').map(Number);
-  const long = Math.max(w || 0, h || 0);
-  if (long >= 2160) return '4k';
-  if (long >= 1080) return '1080p';
-  if (long >= 720) return '720p';
+  const short = Math.min(w || 0, h || 0);
+  if (short >= 2160) return '4k';
+  if (short >= 1080) return '1080p';
+  if (short >= 720) return '720p';
   return '480p';
 }
 
@@ -109,8 +142,81 @@ function sizeToAspectRatio(size) {
   return '9:16';
 }
 
-async function seedanceGetJob(requestId) {
-  const resp = await fetch(`${ROOT_BASE}/queue/bytedance/seedance-2.5/requests/${requestId}/status`, {
+// Snap a requested resolution down (then up) to one the variant supports.
+function clampResolution(res, allowed) {
+  if (!res) return undefined;
+  const r = String(res).toLowerCase();
+  if (allowed.includes(r)) return r;
+  const order = ['480p', '720p', '1080p', '4k'];
+  const want = order.indexOf(r);
+  if (want === -1) return undefined;
+  for (let i = want - 1; i >= 0; i--) if (allowed.includes(order[i])) return order[i];
+  for (let i = want + 1; i < order.length; i++) if (allowed.includes(order[i])) return order[i];
+  return undefined;
+}
+
+function clampDuration(seconds, { minDuration, maxDuration }) {
+  if (seconds == null || seconds === '') return undefined;
+  const s = String(seconds).trim().toLowerCase();
+  if (s === 'auto') return 'auto';
+  const n = Number(s);
+  if (!Number.isFinite(n)) return undefined;
+  return String(Math.min(maxDuration, Math.max(minDuration, Math.round(n))));
+}
+
+async function seedanceCreateJob(args) {
+  const variantKey = seedanceVariant(args.model) || '2.5';
+  const variant = SEEDANCE_VARIANTS[variantKey];
+  const route = seedanceRoute({ imageUrls: args.imageUrls, videoUrls: args.videoUrls, requested: args.seedanceMode });
+  const imgs = (args.imageUrls || []).filter(Boolean);
+  const vids = (args.videoUrls || []).filter(Boolean);
+
+  if (route === 'image-to-video' && !imgs.length) {
+    throw new Error('image-to-video requires imageUrls (1 = first frame, 2 = first + last frame)');
+  }
+  if (route === 'reference-to-video' && !imgs.length && !vids.length) {
+    throw new Error('reference-to-video requires imageUrls or videoUrls');
+  }
+
+  const resolution = clampResolution(args.resolution, variant.resolutions)
+    || clampResolution(sizeToResolution(args.size), variant.resolutions)
+    || SEEDANCE_DEFAULT_RESOLUTION;
+  const duration = clampDuration(args.seconds, variant);
+
+  const body = { prompt: args.prompt, resolution };
+  if (duration) body.duration = duration;
+  const ar = args.aspectRatio || sizeToAspectRatio(args.size);
+  if (ar) body.aspect_ratio = ar;
+  if (args.generateAudio != null) body.generate_audio = !!args.generateAudio;
+
+  if (route === 'image-to-video') {
+    body.image_url = imgs[0];
+    if (imgs[1]) body.end_image_url = imgs[1];
+  } else if (route === 'reference-to-video') {
+    if (imgs.length) body.image_urls = imgs.slice(0, 9);
+    if (vids.length) body.video_urls = vids.slice(0, 3);
+  }
+
+  const url = `${ROOT_BASE}/queue/${variant.path}/${route}`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Key ${CFG.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Seedance API error ${resp.status}: ${text.slice(0, 500)}`);
+  const data = JSON.parse(text);
+  if (!data?.request_id) throw new Error(`No request_id returned: ${text.slice(0, 300)}`);
+  return {
+    job: data,
+    meta: { variant: variantKey, variantLabel: variant.label, route, resolution, duration, queuePath: variant.path, url },
+  };
+}
+
+// The create response carries an absolute status_url; fall back to the conventional path.
+async function seedanceGetJob({ statusUrl, requestId, queuePath }) {
+  const url = statusUrl || `${ROOT_BASE}/queue/${queuePath}/requests/${requestId}/status`;
+  const resp = await fetch(url, {
     headers: { 'Authorization': `Key ${CFG.apiKey}` },
   });
   const text = await resp.text();
@@ -150,16 +256,22 @@ async function videosGetJob(jobId) {
 
 // --- Unified polling --------------------------------------------------------
 // Returns the final job object (backend-specific shape).
-async function pollUntilDone({ requestId, isSeedance, pollIntervalMs, pollTimeoutMs }) {
+async function pollUntilDone({ requestId, isSeedance, queuePath, statusUrl, pollIntervalMs, pollTimeoutMs }) {
   const deadline = Date.now() + pollTimeoutMs;
   while (Date.now() < deadline) {
-    const job = isSeedance ? await seedanceGetJob(requestId) : await videosGetJob(requestId);
+    const job = isSeedance
+      ? await seedanceGetJob({ statusUrl, requestId, queuePath })
+      : await videosGetJob(requestId);
     const status = job?.status;
     if (isSeedance) {
-      if (status === 'COMPLETED') return job;
       if (status === 'FAILED') {
         const d = job?.detail;
-        throw new Error(`Seedance generation FAILED: ${JSON.stringify(d) || 'unknown'}`);
+        throw new Error(`Seedance generation FAILED: ${d?.msg || JSON.stringify(d) || 'unknown'}`);
+      }
+      // The Fal queue also reports COMPLETED for failed jobs — the reason is in `detail`.
+      if (status === 'COMPLETED') {
+        if (job?.detail?.msg) throw new Error(`Seedance generation FAILED: ${job.detail.msg}`);
+        return job;
       }
     } else {
       if (status === 'completed') return job;
@@ -195,7 +307,7 @@ async function downloadBytes(url, outDir, filename, index) {
 
 // --- MCP server -------------------------------------------------------------
 const server = new McpServer(
-  { name: 'video-gen-mcp', version: '2.0.0' },
+  { name: 'video-gen-mcp', version: '2.1.0' },
   { capabilities: { tools: {} } },
 );
 
@@ -204,17 +316,18 @@ server.tool(
   'Generate a video from a text prompt (text-to-video) or from reference images/clips (image/video-to-video) by calling a video-generation model. Submits an async job, polls until complete, downloads the resulting MP4 to disk, and returns its absolute path. Use this to create videos from a description.',
   {
     prompt: z.string().describe('Detailed text description of the video to generate. Include scene, action, style, lighting, mood. Max 2500 chars.'),
-    model: z.string().optional().describe(`Video model id. Seedance ids (e.g. "doubao-seedance-2.5", "bytedance/doubao-seedance-2-5-260628", "byteplus/dreamina-seedance-2-5-260628") route to the Fal queue; "kling-video-o1"/"sora-*" route to /videos. Default: ${DEFAULT_MODEL}`),
-    seconds: z.string().optional().describe('Video duration in seconds (string). Kling: 5/10. Seedance 2.5: 4-30. Default: model-dependent.'),
+    model: z.string().optional().describe(`Video model id. Seedance ids ("bytedance/doubao-seedance-2-0-mini-260615", "doubao-seedance-2.0", "doubao-seedance-2.5", "byteplus/dreamina-seedance-2-5-260628") route to the Fal queue; "kling-video-o1"/"sora-*" route to /videos. Default: ${DEFAULT_MODEL}`),
+    seconds: z.string().optional().describe('Video duration in seconds (string). Kling: 5/10. Seedance: 4-15 (2.0 Mini, 2.0 Fast, 2.0) or 4-30 (2.5), or "auto". Out-of-range values are clamped to the model range.'),
     size: z.string().optional().describe('Resolution "WxH", e.g. 1920x1080, 1080x1920, 1280x720, 1080x1080. Mapped to resolution/aspect_ratio for Seedance.'),
-    resolution: z.string().optional().describe('Seedance only: 480p/720p (2.5), or 480p/720p/1080p/4k (2.0). Overrides size-derived value.'),
+    resolution: z.string().optional().describe('Seedance only: 480p/720p (2.0 Mini, 2.0 Fast) or 480p/720p/1080p/4k (2.0) or 480p/720p/1080p (2.5); clamped to what the model supports. Overrides size-derived value.'),
     aspectRatio: z.string().optional().describe('Seedance only: 21:9, 16:9, 4:3, 1:1, 3:4, 9:16. Overrides size-derived value.'),
+    seedanceMode: z.enum(['auto', ...SEEDANCE_ROUTES]).optional().describe('Seedance only: force the Fal queue route. "auto" (default) picks from imageUrls/videoUrls: none = text-to-video, 1 image = first frame, 2 images = first + last frame, >=3 images or any videoUrl = multi-reference.'),
     mode: z.string().optional().describe('Kling only: std=720P, pro=1080P. Ignored for Seedance.'),
     generateAudio: z.boolean().optional().describe('Seedance only: whether to generate synchronized audio.'),
     outDir: z.string().optional().describe(`Directory to save the video into. Default: ${DEFAULT_OUT_DIR}`),
     filename: z.string().optional().describe('Optional filename (e.g. cicada.mp4). Auto-generated if omitted.'),
-    imageUrls: z.array(z.string()).optional().describe('Optional reference images (public URL or raw base64) for image-to-video.'),
-    videoUrls: z.array(z.string()).optional().describe('Optional reference video URLs (MP4/MOV) for video-to-video.'),
+    imageUrls: z.array(z.string()).optional().describe('Optional reference images (public URL or raw base64). Seedance: 1 = first frame, 2 = first + last frame, >=3 = multi-reference (max 9).'),
+    videoUrls: z.array(z.string()).optional().describe('Optional reference video URLs (MP4/MOV). Seedance: switches to multi-reference (max 3).'),
     pollIntervalMs: z.number().int().positive().optional().describe('Poll interval in ms. Default: 10000'),
     pollTimeoutMs: z.number().int().positive().optional().describe('Max wait in ms before timing out. Default: 900000 (15 min)'),
   },
@@ -222,16 +335,20 @@ server.tool(
     if (!args.prompt) throw new Error('Missing required argument: prompt');
 
     const model = args.model || DEFAULT_MODEL;
-    const useSeedance = isSeedanceModel(model);
+    const useSeedance = !!seedanceVariant(model);
     const pollInterval = args.pollIntervalMs || DEFAULT_POLL_INTERVAL_MS;
     const pollTimeout = args.pollTimeoutMs || DEFAULT_POLL_TIMEOUT_MS;
 
     let requestId;
     let createdText;
+    let queuePath;
+    let statusUrl;
     if (useSeedance) {
-      const job = await seedanceCreateJob(args);
+      const { job, meta } = await seedanceCreateJob({ ...args, model });
       requestId = job.request_id;
-      createdText = `Seedance job created: ${requestId} (status=${job.status}, queue_position=${job.queue_position ?? '-'})`;
+      queuePath = meta.queuePath;
+      statusUrl = job.status_url;
+      createdText = `Seedance ${meta.variantLabel} job created: ${requestId} (route=${meta.route}, resolution=${meta.resolution}, duration=${meta.duration ?? 'auto'}, status=${job.status}, queue_position=${job.queue_position ?? '-'})`;
     } else {
       const imageList = args.imageUrls?.length ? args.imageUrls.map((url) => ({ image: url })) : undefined;
       const videoList = args.videoUrls?.length ? args.videoUrls.map((url) => ({ video_url: url, refer_type: 'base', keep_original_sound: 'no' })) : undefined;
@@ -240,7 +357,7 @@ server.tool(
       createdText = `Video job created: ${job.id} (model=${job.model}, status=${job.status}, size=${job.size ?? '-'}, seconds=${job.seconds ?? '-'})`;
     }
 
-    const finished = await pollUntilDone({ requestId, isSeedance: useSeedance, pollIntervalMs: pollInterval, pollTimeoutMs: pollTimeout });
+    const finished = await pollUntilDone({ requestId, isSeedance: useSeedance, queuePath, statusUrl, pollIntervalMs: pollInterval, pollTimeoutMs: pollTimeout });
     const videos = extractVideoUrls(finished, useSeedance);
     if (!videos.length) throw new Error('Job completed but no video URL returned');
 
@@ -254,8 +371,10 @@ server.tool(
       createdText,
       `Generated ${saved.length} video(s):`,
       ...saved.map((f) => `- ${f.path} (${f.size} bytes, ${f.duration ?? '?'}s)`),
-      'Note: the remote URL expires after 7 days; the local copy persists.',
     ];
+    const tokens = finished?.result?.usage?.total_tokens;
+    if (useSeedance && tokens != null) lines.push(`Seedance usage: ${tokens} tokens.`);
+    lines.push('Note: the remote URL expires after 7 days; the local copy persists.');
     return { content: [{ type: 'text', text: lines.join('\n') }] };
   },
 );
