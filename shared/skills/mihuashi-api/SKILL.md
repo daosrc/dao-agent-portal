@@ -1,6 +1,6 @@
 ---
 name: mihuashi-api
-description: 米画师（Mihuashi）API 接口速查工具。当需要查询米画师接口、定位某个功能对应的接口路径、了解请求参数或数据结构、在测试/正式环境调试接口时使用。触发关键词：接口、API、swagger、接口文档、请求、endpoint、stall、project、user、manuscript、order、hire、workbench、约稿、摊位、稿件、用户、订单。
+description: 米画师（Mihuashi）API 接口速查工具。当需要查询米画师接口、定位某个功能对应的接口路径、了解请求参数或数据结构、在测试/正式环境调试接口时使用。接口需带 cookie 登录态（remember_token）与请求签名（m-t / m-s）。触发关键词：接口、API、swagger、接口文档、请求、endpoint、stall、project、user、manuscript、order、hire、workbench、约稿、摊位、稿件、用户、订单、登录态、cookie、签名。
 ---
 
 # 米画师 API 速查 Skill
@@ -16,22 +16,61 @@ description: 米画师（Mihuashi）API 接口速查工具。当需要查询米�
 
 ---
 
-## 认证方式
+## 认证方式（Cookie）
+
+登录态已从 `localStorage` 迁移到 **Cookie**，页面不再存储 `remember_token`：
 
 ```
-Authorization: Bearer <remember_token>
+Cookie: remember_token=<value>
 ```
 
-- `remember_token`：登录令牌，**使用时手动提供，不写入文件**
-- `remember_token_expires`：token 过期时间（Unix 毫秒时间戳）
-- WebSocket（ActionCable）连接：`/cable?remember_token=<token>`
+- 登录成功后由服务端下发 `remember_token` cookie，**httpOnly**（`document.cookie` 读不到）
+- 浏览器发起的 `/api/**` 请求会自动携带，前端不再手动加头
+- 服务端仍兼容 `Authorization: Bearer <remember_token>`（App / 脚本），但页面已不使用
+- WebSocket（ActionCable）：`/cable?remember_token=<token>`（未变）
 
-**获取 token 的接口：**
+### 需要登录态时
+
+1. **打开登录页让用户自己登录**（不要猜账号密码，也不要反复重试登录接口）：
+   - 测试服 `https://test.mihuashi.com/login`
+   - 正式服 `https://mihuashi.com/login`
+2. 登录成功后读取 cookie：
+   - Chrome DevTools MCP：`Network.getAllCookies` / `Storage.getCookies`，筛 `name=remember_token`
+   - 手工：DevTools → Application → Cookies → `remember_token`
+   - 页面里 `document.cookie` 取不到（httpOnly），别白试
+3. 登录页极验（geetest）偶发 bug 登不进去时：**直接让用户从自己浏览器复制 cookie**，不要反复尝试登录
+
+> cookie / token 不得写入文件、日志、commit 或回复正文。
+
+**登录令牌相关接口**（App 端仍可用，Web 页面不再走这套）：
 ```
-POST /api/v1/authorization_tokens                        # 账号密码登录
+POST /api/v1/authorization_tokens                        # 账号密码登录，换取 token
 PUT  /api/v1/authorization_tokens/{token}/refresh        # 刷新 token
 POST /api/v1/authorization_tokens/{token}/exchange       # App token 换 Web token
+GET  /api/v1/session                                     # 用 cookie 查当前登录用户
 ```
+
+---
+
+## 请求签名（m-t / m-s）
+
+`/api/**` 所有接口（除 `swagger_doc`）都校验请求签名，缺签名直接返回：
+
+```
+HTTP 403 {"error":"signature invalid","msg":"签名错误"}
+```
+
+即使 cookie 有效也一样。请求头：
+
+```
+m-t: <Unix 秒级时间戳>
+m-s: <签名串>
+```
+
+- 签名由前端 WASM 模块 `mhs_fe_sign_bg.wasm` 生成，**无法离线计算**
+- 实测 `m-s` 与 path / method / query 无关，只与时间有关；一次抓取可复用（实测 10 分钟内仍有效，未测到窗口上限，**仍建议现抓现用**）
+- **推荐做法**：在已登录页面里用 `fetch('/api/v1/...')` 发请求 —— 页面已改写 `fetch`，会自动签名并带 cookie；返回 401（未登录）而非 403（签名错误）就说明签名链路正常
+- **curl 调试**：从任意真实 `/api` 请求里复制 `m-t` + `m-s`，再配 cookie 使用
 
 ---
 
@@ -39,7 +78,7 @@ POST /api/v1/authorization_tokens/{token}/exchange       # App token 换 Web tok
 
 | API 组 | Swagger JSON 地址 | 说明 |
 |--------|-------------------|------|
-| **Site API** | `https://test.mihuashi.com/api/v1/swagger_doc` | 主站，589 条路径 |
+| **Site API** | `https://test.mihuashi.com/api/v1/swagger_doc` | 主站，601 条路径（匿名可取） |
 | **Admin API** | `https://test.mihuashi.com/api/admin/v1/swagger_doc` | 管理后台，需管理员 token |
 | **Activity API** | `https://test.mihuashi.com/api/activity/v1/swagger_doc` | 活动专属 |
 | **Wc2 API** | `https://test.mihuashi.com/api/wc2/v1/swagger_doc` | 微信小程序2（画世界） |
@@ -90,19 +129,25 @@ for path, methods in sorted(doc['paths'].items()):
                 if desc: print(f'        {desc}')
 "
 
-# 带认证调试
-curl -H "Authorization: Bearer <your_token>" \
-     https://test.mihuashi.com/api/v1/users/1
+# 带认证调试（cookie + 签名头，缺一不可）
+curl -H "Cookie: remember_token=<your_token>" \
+     -H "m-t: <unix秒>" -H "m-s: <signature>" \
+     https://test.mihuashi.com/api/v1/session
+
+# 页面内调试（自动签名 + 自动带 cookie，最省事）
+# 在已登录页面的 DevTools Console / chrome-devtools evaluate_script 里：
+fetch('/api/v1/session').then(r => r.json()).then(console.log)
 ```
 
 ---
 
 ## Admin API
 
-> **需要管理员 token** 才能访问 Swagger 文档（匿名返回 401）。
+> **需要管理员登录态**才能访问 Swagger 文档（匿名返回 401 / 签名错误）。
 
 ```bash
-curl -H "Authorization: Bearer <admin_token>" \
+curl -H "Cookie: remember_token=<admin_token>" \
+     -H "m-t: <unix秒>" -H "m-s: <signature>" \
      https://test.mihuashi.com/api/admin/v1/swagger_doc | python3 -m json.tool
 ```
 
@@ -134,8 +179,9 @@ curl -H "Authorization: Bearer <admin_token>" \
    → 执行 scripts/view-endpoint.sh 或内联命令（自动拉线）
 
 3. 需要调试？
-   → 手动提供 remember_token
-   → curl -H "Authorization: Bearer <token>" <url>
+   → 打开登录页，让用户登录（cookie 存不住时让用户直接提供 cookie）
+   → 优先在已登录页面里 fetch('/api/v1/...')（自动签名 + 自动带 cookie）
+   → curl 则需同时带 -H "Cookie: remember_token=<token>" 与签名头 m-t / m-s
 
 4. 不确定在哪个 API 组？
    → Site API    主站功能（用户/约稿/稿件/财务）   /api/v1/

@@ -1,6 +1,7 @@
 # Site API 速查目录（/api/v1/）
 
-> 共 589 条路径，约 130 个资源 tag，按业务域分组如下。
+> 共 601 条路径（2026-11 实测），约 130 个资源 tag，按业务域分组如下。
+> 调用需带登录 cookie `remember_token` + 签名头 `m-t` / `m-s`，详见 `SKILL.md`。
 
 ## 用户 & 认证
 
@@ -10,7 +11,7 @@
 | `users` | `GET/PUT /api/v1/users/{id}` | 用户详情与更新 |
 | `users` | `GET /api/v1/users/search` | 搜索用户 |
 | `users` | `PUT /api/v1/users/{id}/avatar` | 更新头像 |
-| `authorization_tokens` | `POST /api/v1/authorization_tokens` | 登录（获取 token） |
+| `authorization_tokens` | `POST /api/v1/authorization_tokens` | 登录换取 token（Web 端改用 cookie） |
 | `accounts` | `PUT /api/v1/accounts/{id}/password` | 修改密码 |
 | `accounts` | `PUT /api/v1/accounts/{id}/phone` | 修改手机号 |
 | `accounts` | `PUT /api/v1/accounts/{id}/email` | 修改邮箱 |
