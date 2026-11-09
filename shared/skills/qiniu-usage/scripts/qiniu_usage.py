@@ -639,6 +639,10 @@ def aggregate_v3_bills(data: dict) -> tuple[dict, list]:
     """Aggregate v3 cost-detail bills into per-model summary + per-date breakdown.
 
     Returns (models_summary, daily). Costs are in CNY (人民币).
+
+    The V3 API returns each category as TWO items: a "k/tokens" line (summary,
+    needs ×1000 conversion) and a ":paygo" line (duplicate fee reference in raw
+    tokens). We skip :paygo rows and convert k/tokens counts before summing.
     """
     models: dict[str, dict] = {}
     daily: dict[str, dict] = {}
@@ -653,22 +657,37 @@ def aggregate_v3_bills(data: dict) -> tuple[dict, list]:
             )
             m["fee"] += model.get("total_fee", 0.0) or 0.0
             for item in model.get("items") or []:
+                key = item.get("key") or ""
+                # Skip paygo rows — they are duplicate fee-reference lines from a
+                # separate accounting system; counting them double-counts tokens.
+                if ":paygo" in key:
+                    continue
                 usage = item.get("usage", {})
                 if _is_token_unit(usage.get("unit")):
                     count = usage.get("count", 0.0) or 0.0
+                    unit = usage.get("unit", "") or ""
+                    # "k/tokens" means the count is in thousands; convert to real tokens.
+                    if "k/" in unit:
+                        count *= 1000
                     m["tokens"] += count
-                    item_key = item.get("key") or ""
-                    if item_key.endswith("_peak"):
+                    if key.endswith("_peak"):
                         m["peak"] += count
-                    elif item_key.endswith("_offpeak"):
+                    elif key.endswith("_offpeak"):
                         m["offpeak"] += count
             if date:
                 d = daily.setdefault(date, {"tokens": 0.0, "fee": 0.0})
                 d["fee"] += model.get("total_fee", 0.0) or 0.0
                 for item in model.get("items") or []:
+                    key = item.get("key") or ""
+                    if ":paygo" in key:
+                        continue
                     usage = item.get("usage", {})
                     if _is_token_unit(usage.get("unit")):
-                        d["tokens"] += usage.get("count", 0.0) or 0.0
+                        count = usage.get("count", 0.0) or 0.0
+                        unit = usage.get("unit", "") or ""
+                        if "k/" in unit:
+                            count *= 1000
+                        d["tokens"] += count
 
     models_summary = sorted(models.values(), key=lambda x: x["fee"], reverse=True)
     return models_summary, daily
@@ -702,14 +721,14 @@ def print_v3_report(models_summary: list, daily: dict, start: datetime, end: dat
         total_tokens = m["tokens"]
         fee = m["fee"]
         print(
-            f"  {m['model']:<{col_model}} │ {format_value(total_tokens):>{col_tokens}} │ {fee:>{col_cost}.2f}"
+            f"  {m['model']:<{col_model}} │ {format_token_count(total_tokens):>{col_tokens}} │ {fee:>{col_cost}.2f}"
         )
         grand_tokens += total_tokens
         grand_fee += fee
 
     print(f"  {'─' * col_model}─┼─{'─' * col_tokens}─┼─{'─' * col_cost}")
     print(
-        f"  {'TOTAL':<{col_model}} │ {format_value(grand_tokens):>{col_tokens}} │ ¥{grand_fee:>{col_cost-1}.2f}"
+        f"  {'TOTAL':<{col_model}} │ {format_token_count(grand_tokens):>{col_tokens}} │ ¥{grand_fee:>{col_cost-1}.2f}"
     )
     print()
 
@@ -724,7 +743,7 @@ def print_v3_report(models_summary: list, daily: dict, start: datetime, end: dat
         print(f"  {'─' * pc}─┼─{'─' * col_tokens}─┼─{'─' * col_tokens}")
         for m in peak_models:
             print(
-                f"  {m['model']:<{pc}} │ {format_value(m['peak']):>{col_tokens}} │ {format_value(m['offpeak']):>{col_tokens}}"
+                f"  {m['model']:<{pc}} │ {format_token_count(m['peak']):>{col_tokens}} │ {format_token_count(m['offpeak']):>{col_tokens}}"
             )
         print()
 
@@ -739,7 +758,7 @@ def print_v3_report(models_summary: list, daily: dict, start: datetime, end: dat
         for date in active_dates:
             d = daily[date]
             print(
-                f"  {date:<{col_date}} │ {format_value(d['tokens']):>{col_tokens}} │ ¥{d['fee']:>{col_cost-1}.2f}"
+                f"  {date:<{col_date}} │ {format_token_count(d['tokens']):>{col_tokens}} │ ¥{d['fee']:>{col_cost-1}.2f}"
             )
         print()
 
@@ -771,10 +790,10 @@ def render_v3_markdown(
     grand_tokens = 0.0
     grand_fee = 0.0
     for m in sorted(models_summary, key=lambda x: x["fee"], reverse=True):
-        lines.append(f"| {esc(m['model'])} | {format_value(m['tokens'])} | {m['fee']:.2f} |")
+        lines.append(f"| {esc(m['model'])} | {format_token_count(m['tokens'])} | {m['fee']:.2f} |")
         grand_tokens += m["tokens"]
         grand_fee += m["fee"]
-    lines.append(f"| **TOTAL** | **{format_value(grand_tokens)}** | **¥{grand_fee:.2f}** |")
+    lines.append(f"| **TOTAL** | **{format_token_count(grand_tokens)}** | **¥{grand_fee:.2f}** |")
     lines.append("")
 
     if daily:
@@ -785,7 +804,7 @@ def render_v3_markdown(
         lines.append("|---|---:|---:|")
         for date in active_dates:
             d = daily[date]
-            lines.append(f"| {esc(date)} | {format_value(d['tokens'])} | ¥{d['fee']:.2f} |")
+            lines.append(f"| {esc(date)} | {format_token_count(d['tokens'])} | ¥{d['fee']:.2f} |")
         lines.append("")
 
     return "\n".join(lines)
@@ -1006,6 +1025,20 @@ def format_value(v: float) -> str:
         return f"{v:.3f} kToken"
     else:
         return f"{v * 1000:.0f} Token"
+
+
+def format_token_count(v: float) -> str:
+    """Format a raw token count (post-aggregation) into human-readable form.
+
+    Unlike format_value (which assumes its input is already in kToken), this
+    function treats the argument as an absolute number of tokens.
+    """
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.2f} MToken"
+    elif v >= 1_000:
+        return f"{v / 1_000:.2f} kToken"
+    else:
+        return f"{v:.0f} Token"
 
 
 def format_cost(usd: float, exchange_rate: float) -> str:
