@@ -27,8 +27,11 @@ fi
 # ──────────────────────────────────────────────
 set -a; source "$REPO_DIR/.env"; set +a
 echo "◆ Compiling opencode/opencode.json from template..."
-sed -e "s/{{QINIU_API_KEY}}/${QINIU_API_KEY:-}/g" \
-    -e "s/{{CONTEXT7_API_KEY}}/${CONTEXT7_API_KEY:-}/g" \
+# Never bake secrets into the generated config: emit references that opencode
+# resolves at runtime (env var / 0600 file). See AGENTS.md "Qiniu API key 取值规则".
+CONTEXT7_KEY_FILE="${CONTEXT7_KEY_FILE:-$HOME/.config/opencode/secrets/context7.key}"
+sed -e "s|{{QINIU_API_KEY}}|{env:QINIU_API_KEY}|g" \
+    -e "s|{{CONTEXT7_API_KEY}}|{file:$CONTEXT7_KEY_FILE}|g" \
     "$REPO_DIR/opencode/opencode.json.template" \
     > "$REPO_DIR/opencode/opencode.json"
 echo "  ✅ opencode/opencode.json generated"
@@ -38,7 +41,15 @@ echo ""
 #  3.  Compile claude/settings.json from template
 # ──────────────────────────────────────────────
 echo "◆ Compiling claude/settings.json from template..."
-sed -e "s|{{ANTHROPIC_AUTH_TOKEN}}|${ANTHROPIC_AUTH_TOKEN:-}|g" \
+# The auth token is NOT persisted by default: settings.json is plaintext at rest.
+# Claude Code picks ANTHROPIC_AUTH_TOKEN from the launching environment, e.g. the
+# `claude` wrapper in ~/.zshrc which reads it from the login keychain per run.
+# Set PERSIST_ANTHROPIC_TOKEN=1 if you really want it written to settings.json.
+CLAUDE_AUTH_TOKEN=""
+if [ "${PERSIST_ANTHROPIC_TOKEN:-0}" = "1" ]; then
+  CLAUDE_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
+fi
+sed -e "s|{{ANTHROPIC_AUTH_TOKEN}}|${CLAUDE_AUTH_TOKEN}|g" \
     -e "s|{{ANTHROPIC_BASE_URL}}|${ANTHROPIC_BASE_URL:-}|g" \
     -e "s|{{ANTHROPIC_MODEL}}|${ANTHROPIC_MODEL:-}|g" \
     -e "s|{{ANTHROPIC_DEFAULT_SONNET_MODEL}}|${ANTHROPIC_DEFAULT_SONNET_MODEL:-}|g" \
