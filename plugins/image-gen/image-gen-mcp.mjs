@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -14,6 +15,29 @@ import { z } from 'zod';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- Config -----------------------------------------------------------------
+const KEYCHAIN_SERVICE = 'qiniu-ai';
+const DEFAULT_BASE_URL = 'https://api.qnaigc.com/v1';
+
+// Read the API key from the macOS login keychain (single source of truth).
+function keychainApiKey() {
+  if (process.platform !== 'darwin') return '';
+  try {
+    return execFileSync(
+      'security',
+      ['find-generic-password', '-a', os.userInfo().username, '-s', KEYCHAIN_SERVICE, '-w'],
+      { encoding: 'utf8', timeout: 10000 },
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+// Resolve "{env:VAR}" placeholders; leave literal values untouched.
+function resolvePlaceholder(value) {
+  const m = /^\{env:([A-Za-z0-9_]+)\}$/.exec(value || '');
+  return m ? process.env[m[1]] || '' : value || '';
+}
+
 function loadQiniuConfig() {
   const envBase = process.env.MODELINK_BASE_URL || process.env.QINIU_BASE_URL || process.env.OPENROUTER_BASE_URL;
   const envKey = process.env.MODELINK_API_KEY || process.env.QINIU_API_KEY || process.env.OPENROUTER_API_KEY;
@@ -27,12 +51,14 @@ function loadQiniuConfig() {
       const raw = fs.readFileSync(p, 'utf-8');
       const cfg = JSON.parse(raw.replace(/^\uFEFF/, ''));
       const q = cfg?.provider?.qiniu;
-      if (q?.options?.baseURL && q?.options?.apiKey) {
-        return { baseURL: q.options.baseURL, apiKey: q.options.apiKey };
-      }
+      const baseURL = resolvePlaceholder(q?.options?.baseURL);
+      const apiKey = resolvePlaceholder(q?.options?.apiKey) || keychainApiKey();
+      if (baseURL && apiKey) return { baseURL, apiKey };
     } catch { /* keep trying */ }
   }
-  throw new Error('Qiniu baseURL/apiKey not found. Set QINIU_BASE_URL/QINIU_API_KEY or configure provider.qiniu in opencode.json');
+  const apiKey = keychainApiKey();
+  if (apiKey) return { baseURL: envBase || DEFAULT_BASE_URL, apiKey };
+  throw new Error('Qiniu baseURL/apiKey not found. Set QINIU_BASE_URL/QINIU_API_KEY, store the key in the login keychain (service qiniu-ai), or configure provider.qiniu in opencode.json');
 }
 
 const QINIU = loadQiniuConfig();

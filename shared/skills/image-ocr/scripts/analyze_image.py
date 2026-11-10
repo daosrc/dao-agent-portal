@@ -20,6 +20,7 @@ import json
 import mimetypes
 import os
 import glob
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -29,19 +30,56 @@ MODEL = "google/gemini-3.1-flash-lite-image"
 IMAGE_EXTS = ("*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.bmp")
 
 
+KEYCHAIN_SERVICE = "qiniu-ai"
+
+
+def keychain_api_key() -> str:
+    """Read the API key from the macOS login keychain (service: qiniu-ai)."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        out = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                os.environ.get("USER", ""),
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def get_api_key() -> str:
-    key = os.environ.get("QINIU_AI_API_KEY")
+    """Resolve API key: env var > macOS login keychain > opencode config."""
+    key = os.environ.get("QINIU_AI_API_KEY") or os.environ.get("QINIU_API_KEY")
     if not key:
-        # fallback: read from opencode config
+        key = keychain_api_key()
+    if not key:
+        # fallback: read from opencode config (only when it holds a literal key,
+        # not an unresolved {env:...} placeholder)
         config_path = os.path.expanduser("~/.config/opencode/opencode.json")
         try:
             with open(config_path) as f:
                 cfg = json.load(f)
             key = cfg.get("provider", {}).get("qiniu", {}).get("options", {}).get("apiKey", "")
+            if key.startswith("{"):
+                key = ""
         except Exception:
             pass
     if not key:
-        print("QINIU_AI_API_KEY not set", file=sys.stderr)
+        print(
+            "QINIU_AI_API_KEY not set and keychain item "
+            f"'{KEYCHAIN_SERVICE}' unavailable",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return key
 

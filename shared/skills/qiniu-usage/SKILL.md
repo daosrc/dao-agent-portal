@@ -255,12 +255,14 @@ When the user asks about Qiniu usage:
 
 ## API Key
 
-The default key is read from `$QINIU_AI_API_KEY` environment variable. The key is associated with account on `portal.qiniu.com`. Data returned is scoped to this API key's usage only.
+The key is resolved in this order: `--api-key` flag → `$QINIU_AI_API_KEY` / `$QINIU_API_KEY`
+environment variables → the macOS login keychain (service `qiniu-ai`). The keychain is the
+single source of truth; env vars are only an override. The key is associated with account on
+`portal.qiniu.com`; data returned is scoped to this API key's usage only.
 
 To use a different key:
 ```bash
-export QINIU_AI_API_KEY='sk-xxx...'
-python3 scripts/qiniu_usage.py --today --cost
+python3 scripts/qiniu_usage.py --api-key 'sk-xxx...' --today --cost
 ```
 
 ## Cache File

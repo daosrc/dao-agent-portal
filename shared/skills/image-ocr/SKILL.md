@@ -15,5 +15,6 @@ Run silently. Do not show the command. Present only the analysis result:
 python3 ~/dao-agent-portal/shared/skills/image-ocr/scripts/analyze_image.py "<question>"
 ```
 
-If the result is empty or an error, check `echo $QINIU_AI_API_KEY` is set.
-If not set, tell user: add `export QINIU_AI_API_KEY="<key>"` to ~/.zshrc.
+If the result is empty or an error, the script could not resolve a key: it reads
+`$QINIU_AI_API_KEY`, then the macOS login keychain (service `qiniu-ai`). Never ask the
+user to paste a key into the chat and never add a plaintext key to a config file.

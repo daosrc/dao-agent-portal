@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.request
 import urllib.parse
@@ -538,13 +539,48 @@ def fetch_prices_from_web() -> tuple[dict, float]:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+KEYCHAIN_SERVICE = "qiniu-ai"
+
+
+def keychain_api_key() -> str:
+    """Read the API key from the macOS login keychain (service: qiniu-ai)."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        out = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                os.environ.get("USER", ""),
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def get_api_key(override: str | None) -> str:
-    """Resolve API key: CLI arg > env var."""
+    """Resolve API key: CLI arg > env var > macOS login keychain."""
     if override:
         return override
-    key = os.environ.get("QINIU_AI_API_KEY") or os.environ.get("QINIU_API_KEY")
+    key = (
+        os.environ.get("QINIU_AI_API_KEY")
+        or os.environ.get("QINIU_API_KEY")
+        or keychain_api_key()
+    )
     if not key:
-        print("Error: No API key found. Set QINIU_AI_API_KEY env var or use --api-key", file=sys.stderr)
+        print(
+            "Error: No API key found. Set QINIU_AI_API_KEY, store it in the login "
+            f"keychain (security add-generic-password -s {KEYCHAIN_SERVICE} ...), or use --api-key",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return key
 

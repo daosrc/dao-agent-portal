@@ -32,6 +32,7 @@ import difflib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -268,16 +269,52 @@ def format_candidate(score: float, m: dict) -> str:
 
 # ── 写配置 ───────────────────────────────────────────────────────────────────
 
+KEYCHAIN_SERVICE = "qiniu-ai"
+
+
+def keychain_api_key() -> str:
+    """Read the API key from the macOS login keychain (service: qiniu-ai)."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        out = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                os.environ.get("USER", ""),
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def _discover_api_key() -> str:
+    """Resolve API key: env var > macOS login keychain > opencode config literal."""
+    key = os.environ.get("QINIU_AI_API_KEY") or os.environ.get("QINIU_API_KEY")
+    if key:
+        return key
+    key = keychain_api_key()
+    if key:
+        return key
     for path in DEFAULT_CONFIGS:
         try:
             d = json.load(open(path, encoding="utf-8"))
         except Exception:
             continue
         opts = (d.get("provider", {}) or {}).get("qiniu", {}).get("options", {}) or {}
-        if opts.get("apiKey"):
-            return opts["apiKey"]
-    return os.environ.get("QINIU_AI_API_KEY", "")
+        val = opts.get("apiKey") or ""
+        # skip unresolved placeholders such as {env:QINIU_API_KEY}
+        if val and not val.startswith("{"):
+            return val
+    return ""
 
 
 def build_entry(m: dict, reasoning: bool | None, with_limits: bool) -> dict:
